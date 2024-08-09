@@ -1,0 +1,14 @@
+[tool.poetry]
+name = "evolutionalnn"
+version = "0.1.0"
+description = ""
+authors = ["Shao-Ting Chiu <stchiu@email.tamu.edu>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.10"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
