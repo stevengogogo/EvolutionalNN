@@ -60,13 +60,16 @@ class ParabolicPDE2D(PDE):
     def boundary_func(self, x):
         return jnp.array(0.)
     
-    def spatial_diff_operator(self, u_func:Callable[[float,float], float]): # u(x,y)-> u
+    def spatial_diff_operator(self, func:Callable[[jnp.ndarray], float]): # u(x,y)-> u
+
+        u_func = lambda x,y: jnp.sum(func(jnp.array([x,y])))
+
         ux = jax.grad(u_func, argnums=0)
         uxx = jax.grad(ux, argnums=0)
         uy = jax.grad(u_func, argnums=1)
         uyy = jax.grad(uy, argnums=1)
         v = self.params[0]
-        Nx_func = lambda x: (uxx(x) + uyy(x)) * v 
+        Nx_func = lambda x,y: (uxx(x,y) + uyy(x,y)) * v 
         return Nx_func
 
 class Sampler(eqx.Module):
@@ -97,6 +100,12 @@ class EvolutionalNN(eqx.Module):
         W, param_restruct = jax.flatten_util.ravel_pytree(nn_param)
         return W, param_restruct, nn_static
     
+    @staticmethod
+    def ufunc(nn_p_arr, x, restruct, nn_static):
+        _nn_param = restruct(nn_p_arr)
+        _nn = eqx.combine(_nn_param, nn_static)
+        return _nn(x)
+    
     def fit_initial(self, nbatch: int, nstep:int, optimizer, key: jr.PRNGKey, tol:float=1e-8):
         nn = self.nn 
         state = optimizer.init(eqx.filter(nn, eqx.is_array))
@@ -112,6 +121,17 @@ class EvolutionalNN(eqx.Module):
                 break
 
         return EvolutionalNN(nn, self.pde, self.filter_spec)
+    
+    def get_N(self, xs): #[batch, dim]
+        nop = self.pde.spatial_diff_operator(self.nn)
+        n_func = lambda x: nop(*x)
+        return jax.vmap(n_func)(xs)
+    
+    def get_J(self, xs):
+        w, restruct, nn_static = self.get_w(self.nn, self.filter_spec)
+        Jf =  jax.jacfwd(self.ufunc, argnums=0)
+        J = jax.vmap(Jf, in_axes=(None, 0, None, None))(w, xs, restruct, nn_static)
+        return J
 
 @eqx.filter_jit
 def update_fn(nn: eqx.Module, data:Data, optimizer, state):
@@ -149,9 +169,10 @@ pde = ParabolicPDE2D(jnp.array([1.]), jnp.array([[-jnp.pi, -jnp.pi], [jnp.pi, jn
 opt = optax.adam(1e-4)
 nbatch = 300
 evonn = EvolutionalNN(eqx.nn.MLP(2, 1, 30, 5, key=key), pde, eqx.is_array)
-evonnfit = evonn.fit_initial(nbatch, 16000, opt, key)
+evonnfit = evonn.fit_initial(nbatch, 1, opt, key)
 
-#%%
+evonnfit.get_N(jnp.ones((10,2)))
+
 # Plotting
 samp = Sampler(pde, nbatch)
 data = samp.samp_init(key)
