@@ -9,7 +9,7 @@ from tqdm.auto import tqdm
 from tqdm import trange
 import optax
 import matplotlib.pyplot as plt
-
+from functools import partial
 nn =  eqx.nn.MLP(1, 2, 2, 2, key=jr.PRNGKey(0))
 
 
@@ -88,27 +88,34 @@ class Sampler(eqx.Module):
         
         self.samp_init = jax.jit(samp_init)
 
+class NNconstructor(eqx.Module):
+    param_restruct: Callable[[jnp.ndarray], jnp.ndarray]
+    nn_static: eqx.Module
+
+    def __call__(self, W):
+        nn_param = self.param_restruct(W)
+        nn = eqx.combine(nn_param, self.nn_static)
+        return nn
+
 class EvolutionalNN(eqx.Module):
-    nn: eqx.Module
     pde: PDE
     filter_spec: Container # spec for time evolution
+    nnconstructor: NNconstructor
+    W: jnp.ndarray
 
-
-    @staticmethod
-    def get_w(nn, filter_spec):
+    def __init__(self, nn, pde, filter_spec):
+        self.pde = pde
+        self.filter_spec = filter_spec
         nn_param, nn_static = eqx.partition(nn, filter_spec)
-        W, param_restruct = jax.flatten_util.ravel_pytree(nn_param)
-        return W, param_restruct, nn_static
+        self.W, param_restruct = jax.flatten_util.ravel_pytree(nn_param)
+        self.nnconstructor = NNconstructor(param_restruct, nn_static)
+
+    def get_nn(self):
+        return self.nnconstructor(self.W)
     
-    @staticmethod
-    def ufunc(nn_p_arr, x, restruct, nn_static):
-        _nn_param = restruct(nn_p_arr)
-        _nn = eqx.combine(_nn_param, nn_static)
-        return _nn(x)
-    
-    def fit_initial(self, nbatch: int, nstep:int, optimizer, key: jr.PRNGKey, tol:float=1e-8):
-        nn = self.nn 
-        state = optimizer.init(eqx.filter(nn, eqx.is_array))
+    def fit_initial(self, nbatch: int, nstep:int, optimizer, key: jr.PRNGKey, filter_spec=eqx.is_array, tol:float=1e-8):
+        nn = self.get_nn()
+        state = optimizer.init(eqx.filter(nn, filter_spec))
         sampler = Sampler(self.pde, nbatch)
 
         iter_step = trange(nstep)
@@ -121,17 +128,33 @@ class EvolutionalNN(eqx.Module):
                 break
 
         return EvolutionalNN(nn, self.pde, self.filter_spec)
-    
-    def get_N(self, xs): #[batch, dim]
-        nop = self.pde.spatial_diff_operator(self.nn)
-        n_func = lambda x: nop(*x)
-        return jax.vmap(n_func)(xs)
+
+    def get_N(self, xs):
+        return get_N(self.W, xs, self.pde.spatial_diff_operator, self.nnconstructor)
     
     def get_J(self, xs):
-        w, restruct, nn_static = self.get_w(self.nn, self.filter_spec)
-        Jf =  jax.jacfwd(self.ufunc, argnums=0)
-        J = jax.vmap(Jf, in_axes=(None, 0, None, None))(w, xs, restruct, nn_static)
-        return J
+        return get_J(self.W, xs, self.nnconstructor)
+
+
+@partial(jax.jit, static_argnums=(0, 2))
+def ufunc(nn_p_arr, x, restructor:NNconstructor):
+    _nn = restructor(nn_p_arr)
+    return _nn(x)   #def get_gamma(self, xs):
+
+def get_N(W, xs, spatial_diff_operator, restructor:NNconstructor): #[batch, dim]
+    nn = restructor(W)
+    nop = spatial_diff_operator(nn)
+    n_func = lambda x: nop(*x)
+    return jax.vmap(n_func)(xs)
+
+@partial(jax.jit, static_argnums=(2,))
+def get_J(W, xs, restructor:NNconstructor):
+    Jf =  jax.jacfwd(ufunc, argnums=0)
+    J = jax.vmap(Jf, in_axes=(None, 0, None))(W, xs, restructor)
+    return jnp.squeeze(J)
+
+
+
 
 @eqx.filter_jit
 def update_fn(nn: eqx.Module, data:Data, optimizer, state):
@@ -166,18 +189,19 @@ pde = ParabolicPDE2D(jnp.array([1.]), jnp.array([[-jnp.pi, -jnp.pi], [jnp.pi, jn
 
 
 # Learn initial condition
-opt = optax.adam(1e-4)
-nbatch = 300
-evonn = EvolutionalNN(eqx.nn.MLP(2, 1, 30, 5, key=key), pde, eqx.is_array)
-evonnfit = evonn.fit_initial(nbatch, 1, opt, key)
+opt = optax.adam(1e-3)
+nbatch = 500
+evonn = EvolutionalNN(eqx.nn.MLP(2, 1, 30, 4, key=key), pde, eqx.is_array)
+evonnfit = evonn.fit_initial(nbatch, 3, opt, key)
 
 evonnfit.get_N(jnp.ones((10,2)))
+evonnfit.get_J(jnp.ones((10,2)))
 
 # Plotting
 samp = Sampler(pde, nbatch)
 data = samp.samp_init(key)
 fig, axs = plt.subplots(ncols=2, figsize=(10,5))
-plot2D(axs[1], evonnfit.nn, pde.xspan[:, 0], pde.xspan[:, 1], ngrid=100)
+plot2D(axs[1], evonnfit.get_nn(), pde.xspan[:, 0], pde.xspan[:, 1], ngrid=100)
 plot2D(axs[0], pde.init_func, pde.xspan[:, 0], pde.xspan[:, 1], ngrid=100)
 axs[0].set_title('Initial Condition')   
 axs[1].set_title('Predict Initial Condition')
