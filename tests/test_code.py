@@ -1,5 +1,6 @@
 #%%
 import jax 
+jax.config.update("jax_enable_x64", True)
 import equinox as eqx
 import jax.numpy as jnp
 import jax.random as jr
@@ -12,6 +13,7 @@ import matplotlib.pyplot as plt
 from functools import partial
 import diffrax as dfx
 import jaxopt
+
 nn =  eqx.nn.MLP(1, 2, 2, 2, key=jr.PRNGKey(0))
 
 
@@ -190,29 +192,9 @@ class EvolutionalNN(eqx.Module):
         W = self.nnconstructor.get_w(nn)
         return self.new_w(W)
 
-    def get_ode(self, grid):
-        xspans = self.pde.xspan.T
-        gen_xgrid = lambda xspan: jnp.linspace(xspan[0], xspan[1], grid)
-        xs_grids = jax.vmap(gen_xgrid)(xspans)
-        Xg = jnp.meshgrid(*xs_grids)
-        xs = jnp.stack([Xg[i].ravel() for i in range(len(Xg))]).T
-        #xs = jr.uniform(jr.PRNGKey(0), (100, 2), minval=pde.xspan[0], maxval=pde.xspan[1])
-        def ode(t, y, args):
-            #gamma = self.get_gamma(y, xs)
-            return y#gamma
-        return ode
-
-    def solve_ode(self, solver=dfx.Dopri5, xgrid=100, tgrid=100, dt0=0.1, rtol=1e-5, atol=1e-5):
-        tspan = self.pde.tspan
-        ode = self.get_ode(xgrid)
-        y0 = self.W
-        print("ODE:\t", ode(0, self.W, 0))
-        term = dfx.ODETerm(ode)
-        saveat = dfx.SaveAt(ts=jnp.linspace(tspan[0], tspan[-1], tgrid))
-        stepsize_controller = dfx.PIDController(rtol=rtol, atol=atol)
-        sol = dfx.diffeqsolve(term, solver, t0=tspan[0], t1=tspan[-1], dt0=dt0, y0=y0, saveat=saveat, stepsize_controller=stepsize_controller)
-           
-        return sol
+    def ode (self, t,y, args):
+        gamma = self.get_gamma(y, xs)
+        return gamma
 
 
 @eqx.filter_jit
@@ -253,23 +235,30 @@ opt = optax.adam(learning_rate=optax.exponential_decay(1e-4, 3000, 0.9, end_valu
 nbatch = 10000
 
 
-evonn = EvolutionalNN.from_nn(eqx.nn.MLP(2, 1, 30, 4, activation=jnp.tanh,key=key), pde, eqx.is_array)
-evonnfit = evonn.fit_initial(nbatch, 1000, opt, key)
+evonn = EvolutionalNN.from_nn(eqx.nn.MLP(2, 1, 20, 4, activation=jnp.tanh,key=key), pde, eqx.is_array)
+evonnfit = evonn.fit_initial(nbatch, 10000, opt, key)
+evonnfit.get_N(evonnfit.W, jr.normal(jr.PRNGKey(0), shape=(2,2)))
+evonnfit.get_J(evonnfit.W, jr.normal(jr.PRNGKey(0), shape=(2,2)))
 
-
-# Mesh 
-xs= jnp.linspace(-jnp.pi, jnp.pi, 100)
-ys = jnp.linspace(-jnp.pi, jnp.pi, 100)
-X, Y = jnp.meshgrid(xs, ys)
-XY = jnp.stack([X.ravel(), Y.ravel()]).T
-
-print("N: \t", evonnfit.get_N(evonnfit.W, XY))
-print("W: \t", evonnfit.get_J(evonnfit.W, XY))
-print("Gamma: \t", evonnfit.get_gamma(evonnfit.W, XY))
+g = evonnfit.get_gamma(evonnfit.W, jr.normal(jr.PRNGKey(0), shape=(10,2)))
+print(g)
 
 # Evolve
+xspans = pde.xspan.T
+gen_xgrid = lambda xspan: jnp.linspace(xspan[0], xspan[1], 1)
+xs_grids = jax.vmap(gen_xgrid)(xspans)
+Xg = jnp.meshgrid(*xs_grids)
+xs = jnp.stack([Xg[i].ravel() for i in range(len(Xg))]).T
 
-sol = evonnfit.solve_ode()
+def ode(t, y, args):
+    gamma = evonnfit.get_gamma(y, xs)
+    return gamma
+
+term = dfx.ODETerm(ode)
+solver = dfx.Euler()
+saveat = dfx.SaveAt(ts=jnp.linspace(pde.tspan[0], pde.tspan[1], 100))
+sol = dfx.diffeqsolve(term, solver, t0=pde.tspan[0], t1=pde.tspan[-1], dt0=0.1, y0=evonnfit.W, saveat=saveat)
+
 print(sol.ts)  # DeviceArray([0.   , 1.   , 2.   , 3.    ])
 print(sol.ys)  # DeviceArray([1.   , 0.368, 0.135, 0.0498])
 #%%
