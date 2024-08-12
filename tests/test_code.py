@@ -70,7 +70,7 @@ class ParabolicPDE2D(PDE):
         uy = jax.grad(u_func, argnums=1)
         uyy = jax.grad(uy, argnums=1)
         v = self.params[0]
-        Nx_func = lambda x,y: (uxx(x,y) + uyy(x,y)) * v 
+        Nx_func = lambda X: (uxx(X[0],X[1]) + uyy(X[0],X[1])) * v 
         return Nx_func
 
 class Sampler(eqx.Module):
@@ -131,13 +131,12 @@ class EvolutionalNN(eqx.Module):
             # Spatial differential operator
             _nn = nnconstructor(W)
             nop = pde.spatial_diff_operator(_nn)
-            n_func = jax.jit(lambda x: nop(*x))
-            return jax.vmap(n_func)(xs)
+            return jax.vmap(nop)(xs)
         
         @jax.jit
         def get_J(W, xs):
             J = Jfv(W, xs)
-            return jnp.squeeze(J)
+            return J.reshape(xs.shape[0], len(W))
 
         # Define gamma method
         get_gamma = None
@@ -169,7 +168,7 @@ class EvolutionalNN(eqx.Module):
         return cls(W, pde, nnconstructor, get_N, get_J, get_gamma)
     
     def new_w(self, W):
-        return EvolutionalNN(W, self.pde, self.nnconstructor, self.get_N, self.get_J)
+        return EvolutionalNN(W, self.pde, self.nnconstructor, self.get_N, self.get_J, self.get_gamma)
 
     def get_nn(self):
         return self.nnconstructor(self.W)
@@ -209,13 +208,13 @@ def loop2d(arr1, arr2, fun):
     fi = jax.vmap(fj, in_axes=(0,0))
     return fi(arr1, arr2).reshape(arr1.shape)
 
-def plot2D(ax, func, xspan=(0,1), yspan=(0,1), ngrid=100):
+def plot2D(fig, ax, func, xspan=(0,1), yspan=(0,1), ngrid=100):
     x = jnp.linspace(*xspan, ngrid)
     y = jnp.linspace(*yspan, ngrid)
     X, Y = jnp.meshgrid(x, y)
     Z =  loop2d(X, Y, func)
-    ax.pcolor(X, Y, Z)
-    return ax
+    bar = ax.pcolor(X, Y, Z)
+    fig.colorbar(bar, ax=ax)
 
 # Setup PDE 
 key = jr.PRNGKey(0)
@@ -225,20 +224,28 @@ pde = ParabolicPDE2D(jnp.array([1.]), jnp.array([[-jnp.pi, -jnp.pi], [jnp.pi, jn
 # Learn initial condition
 opt = optax.adam(1e-3)
 nbatch = 500
-evonn = EvolutionalNN.from_nn(eqx.nn.MLP(2, 1, 30, 4, key=key), pde, eqx.is_array)
-evonnfit = evonn.fit_initial(nbatch, 3, opt, key)
 
-evonnfit.get_N(evonnfit.W, jnp.ones((10,2)))
-evonnfit.get_J(evonnfit.W, jnp.ones((10,2)))
+
+evonn = EvolutionalNN.from_nn(eqx.nn.MLP(2, 1, 30, 4, activation=jnp.tanh,key=key), pde, eqx.is_array)
+evonnfit = evonn.fit_initial(nbatch, 10000, opt, key)
+evonnfit.get_N(evonnfit.W, jr.normal(jr.PRNGKey(0), shape=(2,2)))
+evonnfit.get_J(evonnfit.W, jr.normal(jr.PRNGKey(0), shape=(2,2)))
+g = evonnfit.get_gamma(evonnfit.W, jr.normal(jr.PRNGKey(0), shape=(10,2)))
+print(g)
 
 # Plotting
 samp = Sampler(pde, nbatch)
 data = samp.samp_init(key)
-fig, axs = plt.subplots(ncols=2, figsize=(10,5))
-plot2D(axs[1], evonnfit.get_nn(), pde.xspan[:, 0], pde.xspan[:, 1], ngrid=100)
-plot2D(axs[0], pde.init_func, pde.xspan[:, 0], pde.xspan[:, 1], ngrid=100)
-axs[0].set_title('Initial Condition')   
-axs[1].set_title('Predict Initial Condition')
+dinit = lambda x : - 2 * pde.params[0] * jnp.sin(x[0]) * jnp.sin(x[1])
+dinit_pred = pde.spatial_diff_operator(evonnfit.get_nn())
+fig, axes = plt.subplots(ncols=2, nrows=2, figsize=(12,10))
+axs = axes.ravel()
+plot2D(fig, axs[0], pde.init_func, pde.xspan[:, 0], pde.xspan[:, 1], ngrid=100)
+plot2D(fig, axs[1], evonnfit.get_nn(), pde.xspan[:, 0], pde.xspan[:, 1], ngrid=100)
+plot2D(fig, axs[2], dinit, pde.xspan[:, 0], pde.xspan[:, 1], ngrid=100)
+plot2D(fig, axs[3], dinit_pred, pde.xspan[:, 0], pde.xspan[:, 1], ngrid=100)
+
+[a.set_title(t) for a, t in zip(axs, ["Initial Condition", "Predict Initial Condition", "N_x(u) at t =0", "Predict N_x(u) at t =0"])]
 axs[0].scatter(data.x[:, 0], data.x[:, 1], s=0.1, label="sampled data")
 axs[0].legend(loc='upper right')
 [a.set_xlabel('x') for a in axs.ravel()];
