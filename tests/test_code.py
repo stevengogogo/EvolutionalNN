@@ -10,6 +10,7 @@ from tqdm import trange
 import optax
 import matplotlib.pyplot as plt
 from functools import partial
+import jaxopt
 nn =  eqx.nn.MLP(1, 2, 2, 2, key=jr.PRNGKey(0))
 
 
@@ -91,24 +92,84 @@ class Sampler(eqx.Module):
 class NNconstructor(eqx.Module):
     param_restruct: Callable[[jnp.ndarray], jnp.ndarray]
     nn_static: eqx.Module
+    filter_spec: Container # spec for time evolution
 
     def __call__(self, W):
         nn_param = self.param_restruct(W)
         nn = eqx.combine(nn_param, self.nn_static)
         return nn
 
-class EvolutionalNN(eqx.Module):
-    pde: PDE
-    filter_spec: Container # spec for time evolution
-    nnconstructor: NNconstructor
-    W: jnp.ndarray
+    def get_w(self, nn):
+        nn_param, nn_static = eqx.partition(nn, self.filter_spec)
+        W, param_restruct = jax.flatten_util.ravel_pytree(nn_param)
+        return W
 
-    def __init__(self, nn, pde, filter_spec):
-        self.pde = pde
-        self.filter_spec = filter_spec
+class EvolutionalNN(eqx.Module):
+    W: jnp.ndarray
+    pde: PDE
+    nnconstructor: NNconstructor
+    get_N: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]
+    get_J: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]
+    get_gamma: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]
+    
+    @classmethod
+    def from_nn(cls, nn, pde, filter_spec=eqx.is_array, gamma_method="inverse"):
         nn_param, nn_static = eqx.partition(nn, filter_spec)
-        self.W, param_restruct = jax.flatten_util.ravel_pytree(nn_param)
-        self.nnconstructor = NNconstructor(param_restruct, nn_static)
+        W, param_restruct = jax.flatten_util.ravel_pytree(nn_param)
+        nnconstructor = NNconstructor(param_restruct, nn_static, filter_spec)
+
+        @jax.jit
+        def ufunc(W, x):
+            _nn = nnconstructor(W)
+            return _nn(x)   #def get_gamma(self, xs):
+        
+        Jf =  jax.jit(jax.jacfwd(ufunc, argnums=0))
+        Jfv = jax.vmap(Jf, in_axes=(None, 0))
+
+        @jax.jit
+        def get_N(W, xs): #[batch, dim]
+            # Spatial differential operator
+            _nn = nnconstructor(W)
+            nop = pde.spatial_diff_operator(_nn)
+            n_func = jax.jit(lambda x: nop(*x))
+            return jax.vmap(n_func)(xs)
+        
+        @jax.jit
+        def get_J(W, xs):
+            J = Jfv(W, xs)
+            return jnp.squeeze(J)
+
+        # Define gamma method
+        get_gamma = None
+        if gamma_method == "inverse":
+            @jax.jit        
+            def get_gamma(W, xs):
+                J = get_J(W, xs)
+                N = get_N(W, xs)
+                gamma = jnp.linalg.solve(J.T @ J, J.T @ N)
+                return gamma
+        elif gamma_method == "optimization": 
+            @jax.jit
+            def gamma_loss(gamma, J, N):
+                errM = J.T @ J @ gamma - J.T @ N
+                errs = errM.ravel()
+                return jnp.mean(jnp.square(errs))
+
+            @jax.jit        
+            def get_gamma(W, xs, inital_gamma):
+                J = get_J(W, xs)
+                N = get_N(W, xs)
+                loss = lambda gamma: gamma_loss(gamma, J, N)
+                gamma = jaxopt.ScipyMinimize(loss, inital_gamma, method='L-BFGS-B')
+                return gamma
+                
+        else: 
+            raise ValueError("gamma_method must be either 'inverse' or 'optimization'")
+
+        return cls(W, pde, nnconstructor, get_N, get_J, get_gamma)
+    
+    def new_w(self, W):
+        return EvolutionalNN(W, self.pde, self.nnconstructor, self.get_N, self.get_J)
 
     def get_nn(self):
         return self.nnconstructor(self.W)
@@ -126,35 +187,8 @@ class EvolutionalNN(eqx.Module):
             iter_step.set_postfix({'loss':loss})
             if loss < tol:
                 break
-
-        return EvolutionalNN(nn, self.pde, self.filter_spec)
-
-    def get_N(self, xs):
-        return get_N(self.W, xs, self.pde.spatial_diff_operator, self.nnconstructor)
-    
-    def get_J(self, xs):
-        return get_J(self.W, xs, self.nnconstructor)
-
-
-@partial(jax.jit, static_argnums=(0, 2))
-def ufunc(nn_p_arr, x, restructor:NNconstructor):
-    _nn = restructor(nn_p_arr)
-    return _nn(x)   #def get_gamma(self, xs):
-
-def get_N(W, xs, spatial_diff_operator, restructor:NNconstructor): #[batch, dim]
-    nn = restructor(W)
-    nop = spatial_diff_operator(nn)
-    n_func = lambda x: nop(*x)
-    return jax.vmap(n_func)(xs)
-
-@partial(jax.jit, static_argnums=(2,))
-def get_J(W, xs, restructor:NNconstructor):
-    Jf =  jax.jacfwd(ufunc, argnums=0)
-    J = jax.vmap(Jf, in_axes=(None, 0, None))(W, xs, restructor)
-    return jnp.squeeze(J)
-
-
-
+        W = self.nnconstructor.get_w(nn)
+        return self.new_w(W)
 
 @eqx.filter_jit
 def update_fn(nn: eqx.Module, data:Data, optimizer, state):
@@ -191,11 +225,11 @@ pde = ParabolicPDE2D(jnp.array([1.]), jnp.array([[-jnp.pi, -jnp.pi], [jnp.pi, jn
 # Learn initial condition
 opt = optax.adam(1e-3)
 nbatch = 500
-evonn = EvolutionalNN(eqx.nn.MLP(2, 1, 30, 4, key=key), pde, eqx.is_array)
+evonn = EvolutionalNN.from_nn(eqx.nn.MLP(2, 1, 30, 4, key=key), pde, eqx.is_array)
 evonnfit = evonn.fit_initial(nbatch, 3, opt, key)
 
-evonnfit.get_N(jnp.ones((10,2)))
-evonnfit.get_J(jnp.ones((10,2)))
+evonnfit.get_N(evonnfit.W, jnp.ones((10,2)))
+evonnfit.get_J(evonnfit.W, jnp.ones((10,2)))
 
 # Plotting
 samp = Sampler(pde, nbatch)
@@ -207,7 +241,7 @@ axs[0].set_title('Initial Condition')
 axs[1].set_title('Predict Initial Condition')
 axs[0].scatter(data.x[:, 0], data.x[:, 1], s=0.1, label="sampled data")
 axs[0].legend(loc='upper right')
-[a.set_xlabel('x') for a in axs.ravel()]
-[a.set_ylabel('y') for a in axs.ravel()]
+[a.set_xlabel('x') for a in axs.ravel()];
+[a.set_ylabel('y') for a in axs.ravel()];
 
 # %%
