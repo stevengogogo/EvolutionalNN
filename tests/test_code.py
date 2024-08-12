@@ -221,15 +221,17 @@ key = jr.PRNGKey(0)
 pde = ParabolicPDE2D(jnp.array([1.]), jnp.array([[-jnp.pi, -jnp.pi], [jnp.pi, jnp.pi]]), jnp.array([0., 1.]))
 
 
+
 # Learn initial condition
-opt = optax.adam(1e-3)
-nbatch = 500
+opt = optax.adam(learning_rate=optax.exponential_decay(1e-3, 6000, 0.9, end_value=1e-9))
+nbatch = 10000
 
 
 evonn = EvolutionalNN.from_nn(eqx.nn.MLP(2, 1, 30, 4, activation=jnp.tanh,key=key), pde, eqx.is_array)
-evonnfit = evonn.fit_initial(nbatch, 10000, opt, key)
+evonnfit = evonn.fit_initial(nbatch, 100000, opt, key)
 evonnfit.get_N(evonnfit.W, jr.normal(jr.PRNGKey(0), shape=(2,2)))
 evonnfit.get_J(evonnfit.W, jr.normal(jr.PRNGKey(0), shape=(2,2)))
+
 g = evonnfit.get_gamma(evonnfit.W, jr.normal(jr.PRNGKey(0), shape=(10,2)))
 print(g)
 
@@ -238,12 +240,14 @@ samp = Sampler(pde, nbatch)
 data = samp.samp_init(key)
 dinit = lambda x : - 2 * pde.params[0] * jnp.sin(x[0]) * jnp.sin(x[1])
 dinit_pred = pde.spatial_diff_operator(evonnfit.get_nn())
-fig, axes = plt.subplots(ncols=2, nrows=2, figsize=(12,10))
+dinit_diff = lambda x: dinit(x) - dinit_pred(x)
+fig, axes = plt.subplots(ncols=2, nrows=3, figsize=(12,10))
 axs = axes.ravel()
 plot2D(fig, axs[0], pde.init_func, pde.xspan[:, 0], pde.xspan[:, 1], ngrid=100)
 plot2D(fig, axs[1], evonnfit.get_nn(), pde.xspan[:, 0], pde.xspan[:, 1], ngrid=100)
 plot2D(fig, axs[2], dinit, pde.xspan[:, 0], pde.xspan[:, 1], ngrid=100)
 plot2D(fig, axs[3], dinit_pred, pde.xspan[:, 0], pde.xspan[:, 1], ngrid=100)
+plot2D(fig, axs[4], dinit_diff, pde.xspan[:, 0], pde.xspan[:, 1], ngrid=100)
 
 [a.set_title(t) for a, t in zip(axs, ["Initial Condition", "Predict Initial Condition", "N_x(u) at t =0", "Predict N_x(u) at t =0"])]
 axs[0].scatter(data.x[:, 0], data.x[:, 1], s=0.1, label="sampled data")

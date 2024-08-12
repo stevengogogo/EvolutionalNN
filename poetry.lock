@@ -288,6 +288,26 @@ files = [
 ]
 
 [[package]]
+name = "diffrax"
+version = "0.6.0"
+description = "GPU+autodiff-capable ODE/SDE/CDE solvers written in JAX."
+optional = false
+python-versions = "~=3.9"
+files = [
+    {file = "diffrax-0.6.0-py3-none-any.whl", hash = "sha256:7a59a796fd91e9c1cb20c37696c9f758681a3f24e72ff354a5a6aa335d3cde3a"},
+    {file = "diffrax-0.6.0.tar.gz", hash = "sha256:937207070bd7fdfe99178e23ec1787a630df7e3969b381e072ca6a14f5e2f3d3"},
+]
+
+[package.dependencies]
+equinox = ">=0.11.2"
+jax = ">=0.4.28"
+jaxtyping = ">=0.2.24"
+lineax = ">=0.0.5"
+optimistix = ">=0.0.7"
+typeguard = "2.13.3"
+typing-extensions = ">=4.5.0"
+
+[[package]]
 name = "equinox"
 version = "0.11.4"
 description = "Elegant easy-to-use neural networks in JAX."
@@ -829,6 +849,23 @@ files = [
 ]
 
 [[package]]
+name = "lineax"
+version = "0.0.5"
+description = "Linear solvers in JAX and Equinox."
+optional = false
+python-versions = "~=3.9"
+files = [
+    {file = "lineax-0.0.5-py3-none-any.whl", hash = "sha256:601bcd121b32707642a6bae65188d5925ff6f2c3c46a99954592a6e8be82ac63"},
+    {file = "lineax-0.0.5.tar.gz", hash = "sha256:ed41098dbd94b639287f15682e19cd9ec1dc9ecad6844ee861536044a0e3285c"},
+]
+
+[package.dependencies]
+equinox = ">=0.11.3"
+jax = ">=0.4.26"
+jaxtyping = ">=0.2.20"
+typing-extensions = ">=4.5.0"
+
+[[package]]
 name = "matplotlib"
 version = "3.9.1.post1"
 description = "Python plotting package"
@@ -1179,6 +1216,24 @@ python-versions = "*"
 files = [
     {file = "optim-0.1.0.tar.gz", hash = "sha256:18580b74cf0464995d688dda208642d25f4a2dc3fd9723a43b68cb7c59689e84"},
 ]
+
+[[package]]
+name = "optimistix"
+version = "0.0.7"
+description = "Nonlinear optimisation in JAX and Equinox."
+optional = false
+python-versions = "~=3.9"
+files = [
+    {file = "optimistix-0.0.7-py3-none-any.whl", hash = "sha256:7d1b1b3ab5462142d38f7e1171b597e3df591c7c33de43f85435dc7c0b9aa317"},
+    {file = "optimistix-0.0.7.tar.gz", hash = "sha256:0c649293b01c2029a5f9878fbb912d4977105830b4368b0d44b710b621c49ac3"},
+]
+
+[package.dependencies]
+equinox = ">=0.11.1"
+jax = ">=0.4.18"
+jaxtyping = ">=0.2.23"
+lineax = ">=0.0.4"
+typing-extensions = ">=4.5.0"
 
 [[package]]
 name = "packaging"
@@ -1840,4 +1895,4 @@ files = [
 [metadata]
 lock-version = "2.0"
 python-versions = "^3.10"
-content-hash = "8296ce6bae5587fd1df63be87b644fd2f57d0fa594412d8d818cba737043850e"
+content-hash = "b5d5b737074f3463ef79b9975ca7ce090c150a9acf2a1d1160e28d8deaa92e5c"

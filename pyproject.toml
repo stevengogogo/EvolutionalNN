@@ -15,6 +15,7 @@ tqdm = "^4.66.5"
 optim = "^0.1.0"
 optax = "^0.2.3"
 jaxopt = "^0.8.3"
+diffrax = "^0.6.0"
 
 
 [tool.poetry.group.dev.dependencies]
