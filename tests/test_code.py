@@ -10,6 +10,7 @@ from tqdm import trange
 import optax
 import matplotlib.pyplot as plt
 from functools import partial
+import diffrax as dfx
 import jaxopt
 nn =  eqx.nn.MLP(1, 2, 2, 2, key=jr.PRNGKey(0))
 
@@ -189,6 +190,11 @@ class EvolutionalNN(eqx.Module):
         W = self.nnconstructor.get_w(nn)
         return self.new_w(W)
 
+    def ode (self, t,y, args):
+        gamma = self.get_gamma(evonnfit.W, xs)
+        return gamma
+
+
 @eqx.filter_jit
 def update_fn(nn: eqx.Module, data:Data, optimizer, state):
     loss, grad = eqx.filter_value_and_grad(loss_fn)(nn, data)
@@ -223,17 +229,33 @@ pde = ParabolicPDE2D(jnp.array([1.]), jnp.array([[-jnp.pi, -jnp.pi], [jnp.pi, jn
 
 
 # Learn initial condition
-opt = optax.adam(learning_rate=optax.exponential_decay(1e-3, 6000, 0.9, end_value=1e-9))
+opt = optax.adam(learning_rate=optax.exponential_decay(1e-4, 3000, 0.9, end_value=1e-9))
 nbatch = 10000
 
 
 evonn = EvolutionalNN.from_nn(eqx.nn.MLP(2, 1, 30, 4, activation=jnp.tanh,key=key), pde, eqx.is_array)
-evonnfit = evonn.fit_initial(nbatch, 100000, opt, key)
+evonnfit = evonn.fit_initial(nbatch, 1000, opt, key)
 evonnfit.get_N(evonnfit.W, jr.normal(jr.PRNGKey(0), shape=(2,2)))
 evonnfit.get_J(evonnfit.W, jr.normal(jr.PRNGKey(0), shape=(2,2)))
 
 g = evonnfit.get_gamma(evonnfit.W, jr.normal(jr.PRNGKey(0), shape=(10,2)))
 print(g)
+
+# Evolve
+xs = jr.uniform(jr.PRNGKey(0), (100, 2), minval=pde.xspan[0], maxval=pde.xspan[1])
+
+
+
+
+term = dfx.ODETerm(evonnfit.ode)
+solver = dfx.Dopri5()
+saveat = dfx.SaveAt(ts=jnp.linspace(pde.tspan[0], pde.tspan[1], 100))
+stepsize_controller = dfx.PIDController(rtol=1e-5, atol=1e-5)
+sol = dfx.diffeqsolve(term, solver, t0=pde.tspan[0], t1=pde.tspan[-1], dt0=0.1, y0=evonnfit.W, saveat=saveat, stepsize_controller=stepsize_controller)
+
+print(sol.ts)  # DeviceArray([0.   , 1.   , 2.   , 3.    ])
+print(sol.ys)  # DeviceArray([1.   , 0.368, 0.135, 0.0498])
+#%%
 
 # Plotting
 samp = Sampler(pde, nbatch)
