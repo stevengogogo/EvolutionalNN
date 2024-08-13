@@ -1,6 +1,7 @@
 #%%
 import jax 
 jax.config.update("jax_enable_x64", True)
+#jax.config.update("jax_debug_nans", True)
 import equinox as eqx
 import jax.numpy as jnp
 import jax.random as jr
@@ -13,26 +14,6 @@ import matplotlib.pyplot as plt
 from functools import partial
 import diffrax as dfx
 import jaxopt
-
-nn =  eqx.nn.MLP(1, 2, 2, 2, key=jr.PRNGKey(0))
-
-
-# 
-nn(jnp.array([1.]))
-
-nn_param, nn_static = eqx.partition(nn, eqx.is_array)
-
-nn_p_arr, restruct = jax.flatten_util.ravel_pytree(nn_param)
-
-def u_nn(nn_p_arr, x):
-    _nn_param = restruct(nn_p_arr)
-    _nn = eqx.combine(_nn_param, nn_static)
-    return _nn(x)
-
-
-u_nn(nn_p_arr, jnp.array([1.]))
-
-J = jax.jacfwd(u_nn)(nn_p_arr, jnp.array([1.])) # %%
 
 
 class Data(NamedTuple):
@@ -122,12 +103,12 @@ class EvolutionalNN(eqx.Module):
         nnconstructor = NNconstructor(param_restruct, nn_static, filter_spec)
 
         @jax.jit
-        def ufunc(W, x):
+        def ufunc(W, xs):
             _nn = nnconstructor(W)
-            return _nn(x)   #def get_gamma(self, xs):
+            us = jax.vmap(_nn)(xs)
+            return us   # u(W, x)
         
-        Jf =  jax.jit(jax.jacfwd(ufunc, argnums=0))
-        Jfv = jax.vmap(Jf, in_axes=(None, 0))
+        Jf =  jax.jacrev(ufunc, argnums=0)
 
         @jax.jit
         def get_N(W, xs): #[batch, dim]
@@ -138,7 +119,7 @@ class EvolutionalNN(eqx.Module):
         
         @jax.jit
         def get_J(W, xs):
-            J = Jfv(W, xs)
+            J = Jf(W, xs)
             return J.reshape(xs.shape[0], len(W))
 
         # Define gamma method
@@ -148,7 +129,8 @@ class EvolutionalNN(eqx.Module):
             def get_gamma(W, xs):
                 J = get_J(W, xs)
                 N = get_N(W, xs)
-                gamma = jnp.linalg.solve(J.T @ J, J.T @ N)
+                gamma = jax.scipy.linalg.solve(J.T @ J, J.T @ N, assume_a="sym")
+                #gamma = jnp.linalg.solve(J.T @ J, J.T @ N)
                 return gamma
         elif gamma_method == "optimization": 
             @jax.jit
@@ -194,6 +176,7 @@ class EvolutionalNN(eqx.Module):
 
     def ode (self, t,y, args):
         gamma = self.get_gamma(y, xs)
+        jax.debug.print("Gamma : {gamma}", gamma=gamma)
         return gamma
 
 
@@ -236,31 +219,31 @@ nbatch = 10000
 
 
 evonn = EvolutionalNN.from_nn(eqx.nn.MLP(2, 1, 20, 4, activation=jnp.tanh,key=key), pde, eqx.is_array)
-evonnfit = evonn.fit_initial(nbatch, 10000, opt, key)
-evonnfit.get_N(evonnfit.W, jr.normal(jr.PRNGKey(0), shape=(2,2)))
-evonnfit.get_J(evonnfit.W, jr.normal(jr.PRNGKey(0), shape=(2,2)))
+evonnfit = evonn.fit_initial(nbatch, 30000, opt, key)
 
-g = evonnfit.get_gamma(evonnfit.W, jr.normal(jr.PRNGKey(0), shape=(10,2)))
-print(g)
-
-# Evolve
+#%%
 xspans = pde.xspan.T
-gen_xgrid = lambda xspan: jnp.linspace(xspan[0], xspan[1], 1)
+gen_xgrid = lambda xspan: jnp.linspace(xspan[0], xspan[1], 20)
 xs_grids = jax.vmap(gen_xgrid)(xspans)
 Xg = jnp.meshgrid(*xs_grids)
 xs = jnp.stack([Xg[i].ravel() for i in range(len(Xg))]).T
 
-def ode(t, y, args):
-    gamma = evonnfit.get_gamma(y, xs)
-    return gamma
+evonnfit.get_N(evonnfit.W, xs)
+evonnfit.get_J(evonnfit.W, xs)
 
-term = dfx.ODETerm(ode)
+g = evonnfit.get_gamma(evonnfit.W, xs)
+print(g)
+
+#%% Evolve
+
+
+term = dfx.ODETerm(evonnfit.ode)
 solver = dfx.Euler()
-saveat = dfx.SaveAt(ts=jnp.linspace(pde.tspan[0], pde.tspan[1], 100))
-sol = dfx.diffeqsolve(term, solver, t0=pde.tspan[0], t1=pde.tspan[-1], dt0=0.1, y0=evonnfit.W, saveat=saveat)
+saveat = dfx.SaveAt(ts=jnp.linspace(pde.tspan[0], 0.01, 10))
+#stepsize_controller = dfx.PIDController(rtol=1e-6, atol=1e-6)
+sol = dfx.diffeqsolve(term, solver, t0=pde.tspan[0], t1=0.01, dt0=0.00001, y0=evonnfit.W, saveat=saveat, progress_meter=dfx.TqdmProgressMeter(refresh_steps=5),)
 
-print(sol.ts)  # DeviceArray([0.   , 1.   , 2.   , 3.    ])
-print(sol.ys)  # DeviceArray([1.   , 0.368, 0.135, 0.0498])
+print(sol.ys)  
 #%%
 
 # Plotting
