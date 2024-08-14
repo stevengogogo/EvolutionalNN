@@ -247,7 +247,7 @@ class EvolutionalNN(eqx.Module):
         return gamma
 
 
-#@eqx.filter_jit
+@eqx.filter_jit
 def update_fn(nn: eqx.Module, data:Data, optimizer, state):
     loss, grad = eqx.filter_value_and_grad(loss_fn)(nn, data)
     updates, new_state = optimizer.update(grad, state, nn)
@@ -266,7 +266,7 @@ pde = ParabolicPDE2D(jnp.array([1.]), jnp.array([[-jnp.pi, jnp.pi], [-jnp.pi, jn
 #%%
 # Learn initial condition
 opt = optax.adam(learning_rate=optax.exponential_decay(1e-4, 3000, 0.9, end_value=1e-9))
-nbatch = 10000
+nbatch = 1000
 
 nn = DrichletNet(pde, eqx.nn.MLP(2, 1, 30, 4, activation=jnp.tanh,key=key), ngrid=10)
 evonn = EvolutionalNN.from_nn(nn, pde, eqx.is_array)
