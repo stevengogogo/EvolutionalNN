@@ -1,7 +1,7 @@
 #%%
 import jax 
 jax.config.update("jax_enable_x64", False)
-#jax.config.update("jax_debug_nans", True)
+jax.config.update("jax_debug_nans", True)
 import equinox as eqx
 import numpy as np
 import jax.numpy as jnp
@@ -46,19 +46,19 @@ class DrichletNet(eqx.Module):
             ngrid (int, optional): Bound points on each edge. Defaults to 2.
         """
         xspans = pde.xspan.T
-        gen_xgrid = lambda xspan: jnp.linspace(xspan[0], xspan[1], ngrid)
-        xs_grids = jax.vmap(gen_xgrid)(xspans)
+        xs_bound = gen_bound_points(pde.xspan, ngrid)
 
         self.nn = nn 
         self.boundary_func = pde.boundary_func
-        self.get_x_bounds = lambda : xs_grids
+        self.get_x_bounds = lambda : xs_bound
 
     @staticmethod
     @jax.jit
     def get_coeffs(x, x_bounds):
-        As = jax.vmap(dist, in_axes=(0, None))(x, x_bounds)
+        As = jax.vmap(dist, in_axes=(None, 0))(x, x_bounds)
         Asmut = jnp.prod(As) 
         cs = jax.vmap(get_c, in_axes=(None, 0))(Asmut, As)
+        #jax.debug.print("cs: {cs}", cs=cs)
         return cs
     
     @eqx.filter_jit
@@ -70,22 +70,42 @@ class DrichletNet(eqx.Module):
         return v_x + jnp.inner(coeffs, v_x_bounds) + self.boundary_func(x)
 
 def gen_bound_points(xspans, ngrid):
+    """Create points on boundaries
+
+    Args:
+        xspans: [[x_low, x_high], [y_low, y_high]]
+        ngrid: number of points on boundaries
+
+    Returns:
+        points: shape ((n-1)*dim, dim)
+    """
+    dim = xspans.shape[0]
     xgridf = lambda xspan: jnp.linspace(xspan[0], xspan[1], ngrid).reshape(-1, 1)
-    def xcoordf(xspan):
+
+    def xcoordf(xspan, is_add_afters):
         xgrid = xgridf(xspan)
-        points = jax.vmap(jax.vmap(add_val, in_axes=(None, 0)), in_axes=(None, 0))(xgrid, xspans)
+        points = jax.vmap(jax.vmap(add_val, in_axes=(None, 0, None)), in_axes=(None, 0, 0))(xgrid, xspans, is_add_afters)
         return points
 
-    def add_val(x, val):
-        return jnp.concatenate([x, jnp.ones((x.shape[0], 1)) * val], axis=1)
+    def add_val(x, val, is_after):
+        def add_before():
+            return jnp.concatenate([jnp.ones((x.shape[0], 1)) * val, x], axis=1)
+        
+        def add_after():
+            return jnp.concatenate([x, jnp.ones((x.shape[0], 1)) * val], axis=1)
 
-    xcoords = jax.vmap(xcoordf, in_axes=(0,))(xspans)
+        return jax.lax.cond(is_after, add_after, add_before)
+
+    Is_add_afters = [jnp.concatenate((jnp.zeros((i,)), jnp.ones(((dim - int(i)),))), axis=0) for i in jnp.arange(dim)]
+    Is_add_afters = jnp.array(Is_add_afters)
+
+    xcoords = jax.vmap(xcoordf, in_axes=(0,0))(xspans, Is_add_afters)
     xcoords = xcoords.reshape(-1, xspans.shape[0])
-
     return jnp.unique(xcoords, axis=0)
 
 @jax.jit
 def dist(x1, x2):
+    """Measure Elucid distance between x1 and x2"""
     return jnp.linalg.norm(x1 - x2)
 
 @jax.jit
@@ -96,7 +116,7 @@ def get_c(Asprod_all, a):
 
 class ParabolicPDE2D(PDE):
     params: jnp.ndarray #[v]
-    xspan: jnp.ndarray # spatial domain [[x_low, y_low], [x_high, y_high]]
+    xspan: jnp.ndarray # spatial domain [[x_low, x_high], [y_low, y_high]]
     tspan: jnp.ndarray # time domain
     
     def init_func(self, x):
@@ -128,10 +148,10 @@ class Sampler(eqx.Module):
     def __init__(self, pde, batch):
         self.pde = pde
         self.batch = batch
-        dim = pde.xspan.shape[1]
+        dim = pde.xspan.shape[0]
         
         def samp_init(key):
-            x = jr.uniform(key, (batch, dim), minval=self.pde.xspan[0], maxval=self.pde.xspan[1])
+            x = jr.uniform(key, (batch, dim), minval=self.pde.xspan[:,0], maxval=self.pde.xspan[:,1])
             y = jax.vmap(self.pde.init_func)(x)
             return Data(x,y)
         
@@ -227,7 +247,7 @@ class EvolutionalNN(eqx.Module):
         return gamma
 
 
-@eqx.filter_jit
+#@eqx.filter_jit
 def update_fn(nn: eqx.Module, data:Data, optimizer, state):
     loss, grad = eqx.filter_value_and_grad(loss_fn)(nn, data)
     updates, new_state = optimizer.update(grad, state, nn)
@@ -241,9 +261,8 @@ def loss_fn(nn, data:Data):
     
 # Setup PDE 
 key = jr.PRNGKey(0)
-pde = ParabolicPDE2D(jnp.array([1.]), jnp.array([[-jnp.pi, -jnp.pi], [jnp.pi, jnp.pi]]), jnp.array([0., 1.]))
+pde = ParabolicPDE2D(jnp.array([1.]), jnp.array([[-jnp.pi, jnp.pi], [-jnp.pi, jnp.pi]]), jnp.array([0., 1.]))
 
-point = gen_bound_points(pde.xspan.T, 5)
 #%%
 # Learn initial condition
 opt = optax.adam(learning_rate=optax.exponential_decay(1e-4, 3000, 0.9, end_value=1e-9))
@@ -254,7 +273,7 @@ evonn = EvolutionalNN.from_nn(nn, pde, eqx.is_array)
 evonnfit = evonn.fit_initial(nbatch, 50000, opt, key)
 
 #%%
-xspans = pde.xspan.T
+xspans = pde.xspan
 gen_xgrid = lambda xspan: jnp.linspace(xspan[0], xspan[1], 65)
 xs_grids = jax.vmap(gen_xgrid)(xspans)
 Xg = jnp.meshgrid(*xs_grids)
@@ -276,6 +295,11 @@ sol = dfx.diffeqsolve(term, solver, t0=pde.tspan[0], t1=pde.tspan[-1], dt0=0.1, 
 #%%
 
 # Plotting
+
+# Boundaries
+point = gen_bound_points(pde.xspan, 5)
+plt.scatter(point[:,0], point[:,1])
+
 @eqx.filter_jit
 def loop2d(arr1, arr2, fun):
     funcex = jax.jit(lambda x,y: fun(jnp.stack([x,y])))
@@ -300,11 +324,11 @@ dinit_pred = pde.spatial_diff_operator(evonnfit.get_nn())
 dinit_diff = lambda x: dinit(x) - dinit_pred(x)
 fig, axes = plt.subplots(ncols=2, nrows=3, figsize=(12,10))
 axs = axes.ravel()
-plot2D(fig, axs[0], pde.init_func, pde.xspan[:, 0], pde.xspan[:, 1], ngrid=100)
-plot2D(fig, axs[1], evonnfit.get_nn(), pde.xspan[:, 0], pde.xspan[:, 1], ngrid=100)
-plot2D(fig, axs[2], dinit, pde.xspan[:, 0], pde.xspan[:, 1], ngrid=100)
-plot2D(fig, axs[3], dinit_pred, pde.xspan[:, 0], pde.xspan[:, 1], ngrid=100)
-plot2D(fig, axs[4], dinit_diff, pde.xspan[:, 0], pde.xspan[:, 1], ngrid=100)
+plot2D(fig, axs[0], pde.init_func, pde.xspan[0], pde.xspan[1], ngrid=100)
+plot2D(fig, axs[1], evonnfit.get_nn(), pde.xspan[0], pde.xspan[1], ngrid=100)
+plot2D(fig, axs[2], dinit, pde.xspan[0], pde.xspan[1], ngrid=100)
+plot2D(fig, axs[3], dinit_pred, pde.xspan[0], pde.xspan[1], ngrid=100)
+plot2D(fig, axs[4], dinit_diff, pde.xspan[0], pde.xspan[1], ngrid=100)
 
 [a.set_title(t) for a, t in zip(axs, ["Initial Condition", "Predict Initial Condition", "N_x(u) at t =0", "Predict N_x(u) at t =0"])]
 axs[0].scatter(data.x[:, 0], data.x[:, 1], s=0.1, label="sampled data")
@@ -318,15 +342,15 @@ w = sol.ys[i]
 t = sol.ts[i]
 fig2, ax2 = plt.subplots(nrows=1, ncols=2, figsize=(15, 6))
 ax22 = ax2.ravel()
-plot2D(fig2, ax22[0], lambda x: pde.u_true(x, t), pde.xspan[:, 0], pde.xspan[:, 1], ngrid=100)
-plot2D(fig2, ax22[1], evonnfit.new_w(w).get_nn(), pde.xspan[:, 0], pde.xspan[:, 1], ngrid=100)
+plot2D(fig2, ax22[0], lambda x: pde.u_true(x, t), pde.xspan[0], pde.xspan[1], ngrid=100)
+plot2D(fig2, ax22[1], evonnfit.new_w(w).get_nn(), pde.xspan[0], pde.xspan[1], ngrid=100)
 ax2[0].set_title(f"True N_x(u) at t = {t}")
 ax2[1].set_title(f"Predict N_x(u) at t = {t}")
 fig2.savefig("2dparabolic.png", dpi=300)
 
 # %% Plot comparison in section
 def plot_sections(ax, y, sol, evon, pde, u_true, label=None):
-    xs = jnp.linspace(pde.xspan[0, 0], pde.xspan[1, 0], 100)
+    xs = jnp.linspace(*pde.xspan[0], 100)
     for w, t in zip(sol.ys, sol.ts):
 
         nn = evonnfit.new_w(w).get_nn()
@@ -350,8 +374,8 @@ fig3.savefig("1dparabolic.png", dpi=300)
 
 #%% Error versus time
 def plot_error(ax, sol, evon, pde, u_true, label=None):
-    x = jnp.linspace(*pde.xspan.T[0], 100)
-    y = jnp.linspace(*pde.xspan.T[1], 100)
+    x = jnp.linspace(*pde.xspan[0], 100)
+    y = jnp.linspace(*pde.xspan[1], 100)
     X, Y = jnp.meshgrid(x, y)
     XY = jnp.stack([X.ravel(), Y.ravel()]).T
     err = []
