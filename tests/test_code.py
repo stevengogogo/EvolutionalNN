@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 from functools import partial
 import diffrax as dfx
 import jaxopt
+import numpy as np
 
 class Data(NamedTuple):
     x: jnp.ndarray
@@ -33,6 +34,65 @@ class PDE(eqx.Module):
     @abc.abstractmethod
     def spatial_diff_operator(self, u_func): # u(x, )
         raise NotImplementedError
+
+
+class DrichletNet(eqx.Module):
+    nn: eqx.Module
+    boundary_func: Callable[[jnp.ndarray], float]
+    get_x_bounds: Callable[[], jnp.ndarray]
+
+    def __init__(self, pde, nn, ngrid=10):
+        """Enforce Drichlet boundary condition
+            ngrid (int, optional): Bound points on each edge. Defaults to 2.
+        """
+        xspans = pde.xspan.T
+        gen_xgrid = lambda xspan: jnp.linspace(xspan[0], xspan[1], ngrid)
+        xs_grids = jax.vmap(gen_xgrid)(xspans)
+
+        self.nn = nn 
+        self.boundary_func = pde.boundary_func
+        self.get_x_bounds = lambda : xs_grids
+
+    @staticmethod
+    @jax.jit
+    def get_coeffs(x, x_bounds):
+        As = jax.vmap(dist, in_axes=(0, None))(x, x_bounds)
+        Asmut = jnp.prod(As) 
+        cs = jax.vmap(get_c, in_axes=(None, 0))(Asmut, As)
+        return cs
+    
+    @eqx.filter_jit
+    def __call__(self, x):
+        x_bounds = self.get_x_bounds() # shape (n, dim)
+        v_x = self.nn(x)
+        coeffs = self.get_coeffs(x, x_bounds).ravel()
+        v_x_bounds = jax.vmap(self.nn)(x_bounds).ravel()
+        return v_x + jnp.inner(coeffs, v_x_bounds) + self.boundary_func(x)
+
+def gen_bound_points(xspans, ngrid):
+    xgridf = lambda xspan: jnp.linspace(xspan[0], xspan[1], ngrid).reshape(-1, 1)
+    def xcoordf(xspan):
+        xgrid = xgridf(xspan)
+        points = jax.vmap(jax.vmap(add_val, in_axes=(None, 0)), in_axes=(None, 0))(xgrid, xspans)
+        return points
+
+    def add_val(x, val):
+        return jnp.concatenate([x, jnp.ones((x.shape[0], 1)) * val], axis=1)
+
+    xcoords = jax.vmap(xcoordf, in_axes=(0,))(xspans)
+    xcoords = xcoords.reshape(-1, xspans.shape[0])
+
+    return jnp.unique(xcoords, axis=0)
+
+@jax.jit
+def dist(x1, x2):
+    return jnp.linalg.norm(x1 - x2)
+
+@jax.jit
+def get_c(Asprod_all, a):
+    Aprod = Asprod_all / a
+    return - (Aprod / (Aprod + a))
+
 
 class ParabolicPDE2D(PDE):
     params: jnp.ndarray #[v]
@@ -183,14 +243,14 @@ def loss_fn(nn, data:Data):
 key = jr.PRNGKey(0)
 pde = ParabolicPDE2D(jnp.array([1.]), jnp.array([[-jnp.pi, -jnp.pi], [jnp.pi, jnp.pi]]), jnp.array([0., 1.]))
 
-
-
+point = gen_bound_points(pde.xspan.T, 5)
+#%%
 # Learn initial condition
 opt = optax.adam(learning_rate=optax.exponential_decay(1e-4, 3000, 0.9, end_value=1e-9))
 nbatch = 10000
 
-
-evonn = EvolutionalNN.from_nn(eqx.nn.MLP(2, 1, 30, 4, activation=jnp.tanh,key=key), pde, eqx.is_array)
+nn = DrichletNet(pde, eqx.nn.MLP(2, 1, 30, 4, activation=jnp.tanh,key=key), ngrid=10)
+evonn = EvolutionalNN.from_nn(nn, pde, eqx.is_array)
 evonnfit = evonn.fit_initial(nbatch, 50000, opt, key)
 
 #%%
