@@ -3,6 +3,7 @@ import jax
 jax.config.update("jax_enable_x64", False)
 #jax.config.update("jax_debug_nans", True)
 import equinox as eqx
+import numpy as np
 import jax.numpy as jnp
 import jax.random as jr
 from typing import NamedTuple, Callable, Container
@@ -14,7 +15,6 @@ import matplotlib.pyplot as plt
 from functools import partial
 import diffrax as dfx
 import jaxopt
-
 
 class Data(NamedTuple):
     x: jnp.ndarray
@@ -186,6 +186,14 @@ def loop2d(arr1, arr2, fun):
     fi = jax.vmap(fj, in_axes=(0,0))
     return fi(arr1, arr2).reshape(arr1.shape)
 
+def plot2D(fig, ax, func, xspan=(0,1), yspan=(0,1), ngrid=100):
+    x = jnp.linspace(*xspan, ngrid)
+    y = jnp.linspace(*yspan, ngrid)
+    X, Y = jnp.meshgrid(x, y)
+    Z =  loop2d(X, Y, func)
+    bar = ax.pcolor(X, Y, Z, cmap='seismic')
+    fig.colorbar(bar, ax=ax)
+    
 # Setup PDE 
 key = jr.PRNGKey(0)
 pde = ParabolicPDE2D(jnp.array([1.]), jnp.array([[-jnp.pi, -jnp.pi], [jnp.pi, jnp.pi]]), jnp.array([0., 1.]))
@@ -197,12 +205,12 @@ opt = optax.adam(learning_rate=optax.exponential_decay(1e-4, 3000, 0.9, end_valu
 nbatch = 10000
 
 
-evonn = EvolutionalNN.from_nn(eqx.nn.MLP(2, 1, 20, 4, activation=jnp.tanh,key=key), pde, eqx.is_array)
-evonnfit = evonn.fit_initial(nbatch, 30000, opt, key)
+evonn = EvolutionalNN.from_nn(eqx.nn.MLP(2, 1, 30, 4, activation=jnp.tanh,key=key), pde, eqx.is_array)
+evonnfit = evonn.fit_initial(nbatch, 50000, opt, key)
 
 #%%
 xspans = pde.xspan.T
-gen_xgrid = lambda xspan: jnp.linspace(xspan[0], xspan[1], 129)
+gen_xgrid = lambda xspan: jnp.linspace(xspan[0], xspan[1], 65)
 xs_grids = jax.vmap(gen_xgrid)(xspans)
 Xg = jnp.meshgrid(*xs_grids)
 xs = jnp.stack([Xg[i].ravel() for i in range(len(Xg))]).T
@@ -215,24 +223,14 @@ print(g)
 
 #%% Evolve
 term = dfx.ODETerm(evonnfit.ode)
-solver = dfx.Tsit5()
-stepsize_controller = dfx.PIDController(rtol=1e-4, atol=1e-4)
-saveat = dfx.SaveAt(ts=[0.1, 0.2, 0.4, pde.tspan[-1]])
-sol = dfx.diffeqsolve(term, solver, t0=pde.tspan[0], t1=pde.tspan[-1], dt0=0.01, y0=evonnfit.W, saveat=saveat, stepsize_controller=stepsize_controller, progress_meter=dfx.TqdmProgressMeter(refresh_steps=2),)
+solver = dfx.Bosh3()
+stepsize_controller = dfx.PIDController(rtol=1e-5, atol=1e-5)
+saveat = dfx.SaveAt(ts=np.linspace(pde.tspan[0], pde.tspan[-1], 10).tolist())
+sol = dfx.diffeqsolve(term, solver, t0=pde.tspan[0], t1=pde.tspan[-1], dt0=0.1, y0=evonnfit.W, saveat=saveat, stepsize_controller=stepsize_controller, progress_meter=dfx.TqdmProgressMeter(refresh_steps=2))
 #print(sol.ys)  
 #%%
 
 # Plotting
-import matplotlib as mpl
-def plot2D(fig, ax, func, xspan=(0,1), yspan=(0,1), ngrid=100):
-    x = jnp.linspace(*xspan, ngrid)
-    y = jnp.linspace(*yspan, ngrid)
-    X, Y = jnp.meshgrid(x, y)
-    Z =  loop2d(X, Y, func)
-    bar = ax.pcolor(X, Y, Z, cmap='seismic')
-    fig.colorbar(bar, ax=ax)
-
-    
 samp = Sampler(pde, nbatch)
 data = samp.samp_init(key)
 dinit = lambda x : - 2 * pde.params[0] * jnp.sin(x[0]) * jnp.sin(x[1])
@@ -252,12 +250,63 @@ axs[0].legend(loc='upper right')
 [a.set_xlabel('x') for a in axs.ravel()];
 [a.set_ylabel('y') for a in axs.ravel()];
 
-# %%
-for i, w in enumerate(sol.ys):
-    fig2, ax2 = plt.subplots(nrows=1, ncols=2, figsize=(15, 6))
-    plot2D(fig2, ax2[0], lambda x: pde.u_true(x, sol.ts[i]), pde.xspan[:, 0], pde.xspan[:, 1], ngrid=100)
-    plot2D(fig2, ax2[1], evonnfit.new_w(w).get_nn(), pde.xspan[:, 0], pde.xspan[:, 1], ngrid=100)
-    ax2[0].set_title(f"True N_x(u) at t = {sol.ts[i]}")
-    ax2[1].set_title(f"Predict N_x(u) at t = {sol.ts[i]}")
-    plt.show()
+# %% Plot comparison
+i = 2
+w = sol.ys[i]
+t = sol.ts[i]
+fig2, ax2 = plt.subplots(nrows=1, ncols=2, figsize=(15, 6))
+ax22 = ax2.ravel()
+plot2D(fig2, ax22[0], lambda x: pde.u_true(x, t), pde.xspan[:, 0], pde.xspan[:, 1], ngrid=100)
+plot2D(fig2, ax22[1], evonnfit.new_w(w).get_nn(), pde.xspan[:, 0], pde.xspan[:, 1], ngrid=100)
+ax2[0].set_title(f"True N_x(u) at t = {t}")
+ax2[1].set_title(f"Predict N_x(u) at t = {t}")
+fig2.savefig("2dparabolic.png", dpi=300)
+# %% 
+y = 1.0
+xs = jnp.linspace(pde.xspan[0, 0], pde.xspan[1, 0], 100)
+fig3, ax3 = plt.subplots()
+for w, t in zip(sol.ys, sol.ts):
+
+    nn = evonnfit.new_w(w).get_nn()
+    u_trueF = lambda x: pde.u_true(jnp.array([x, y]), t)
+    u_predF = lambda x: jnp.sum(nn(jnp.array([x, y])))
+
+    u_true = jax.vmap(u_trueF)(xs)
+    u_pred = jax.vmap(u_predF)(xs)
+    ax3.plot(xs, u_true, color="black")
+    ax3.plot(xs, u_pred, color="red", linestyle="--")
+
+ax3.plot(xs, u_true, color="black", label="Analytical Sol.")
+ax3.plot(xs, u_pred, color="red", linestyle="--", label="Prediction")
+ax3.legend()
+ax3.set_xlabel("x")
+ax3.set_ylabel("u")
+fig3.savefig("1dparabolic.png", dpi=300)
+
+#%% Error versus time
+def plot_error(ax, sol, evon, pde, u_true, label=None):
+    x = jnp.linspace(*pde.xspan.T[0], 100)
+    y = jnp.linspace(*pde.xspan.T[1], 100)
+    X, Y = jnp.meshgrid(x, y)
+    XY = jnp.stack([X.ravel(), Y.ravel()]).T
+    err = []
+    for w,t in zip(sol.ys, sol.ts):
+        nn = evonnfit.new_w(w).get_nn()
+        u_predf = lambda x: jnp.sum(nn(x))
+        u_true = jax.vmap(pde.u_true, in_axes=(0,None))(XY, t)
+        u_pred = jax.vmap(u_predf)(XY)
+        error = jnp.linalg.norm(u_true - u_pred) / jnp.linalg.norm(u_true)
+        err.append(error)
+    ax.plot(sol.ts, err, color="black", label=None)
+    ax.set_xlabel("t")
+    ax.set_ylabel("Relative Error")
+    return ax
+
+fig4, ax4 = plt.subplots()
+plot_error(ax4, sol, evonnfit, pde, pde.u_true)
+fig4.savefig(f"error.png", dpi=300)
+
+
+
+
 # %%
