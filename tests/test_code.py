@@ -69,6 +69,18 @@ class DrichletNet(eqx.Module):
         v_x_bounds = jax.vmap(self.nn)(x_bounds).ravel()
         return v_x + jnp.inner(coeffs, v_x_bounds) + self.boundary_func(x)
 
+    def get_filter_spec(self):
+        filter_spec = jax.tree_util.tree_map(lambda _: False, self)
+        filter_spec = jax.tree_util.tree_map(lambda _: False, self)
+
+        # Freeze Center
+        filter_spec = eqx.tree_at(
+            lambda tree: (tree.nn,),
+            filter_spec,
+            replace=(eqx.filter(filter_spec.nn, eqx.is_array, replace=False),),
+        )
+        return filter_spec
+
 def gen_bound_points(xspans, ngrid):
     """Create points on boundaries
 
@@ -266,10 +278,10 @@ pde = ParabolicPDE2D(jnp.array([1.]), jnp.array([[-jnp.pi, jnp.pi], [-jnp.pi, jn
 #%%
 # Learn initial condition
 opt = optax.adam(learning_rate=optax.exponential_decay(1e-4, 3000, 0.9, end_value=1e-9))
-nbatch = 1000
+nbatch = 10000
 
 nn = DrichletNet(pde, eqx.nn.MLP(2, 1, 30, 4, activation=jnp.tanh,key=key), ngrid=10)
-evonn = EvolutionalNN.from_nn(nn, pde, eqx.is_array)
+evonn = EvolutionalNN.from_nn(nn, pde, nn.get_filter_spec())
 evonnfit = evonn.fit_initial(nbatch, 50000, opt, key)
 
 #%%
