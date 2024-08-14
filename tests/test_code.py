@@ -70,16 +70,12 @@ class DrichletNet(eqx.Module):
         return v_x + jnp.inner(coeffs, v_x_bounds) + self.boundary_func(x)
 
     def get_filter_spec(self):
-        filter_spec = jax.tree_util.tree_map(lambda _: False, self)
-        filter_spec = jax.tree_util.tree_map(lambda _: False, self)
-
-        # Freeze Center
-        filter_spec = eqx.tree_at(
-            lambda tree: (tree.nn,),
-            filter_spec,
-            replace=(eqx.filter(filter_spec.nn, eqx.is_array, replace=False),),
-        )
+        new_nn = eqx.filter(self.nn, eqx.is_array, replace=False)
+        new_nn = eqx.filter(new_nn, eqx.is_array, replace=True, inverse=True)
+        _filter_spec = jax.tree_util.tree_map(lambda _: False, self)
+        filter_spec = eqx.tree_at(lambda tree: tree.nn, _filter_spec, new_nn)
         return filter_spec
+        
 
 def gen_bound_points(xspans, ngrid):
     """Create points on boundaries
@@ -184,6 +180,12 @@ class NNconstructor(eqx.Module):
         W, param_restruct = jax.flatten_util.ravel_pytree(nn_param)
         return W
 
+def get_filter_spec(nn):
+    if isinstance(nn, DrichletNet):
+        return nn.get_filter_spec()
+    else:
+        return eqx.is_array
+
 class EvolutionalNN(eqx.Module):
     W: jnp.ndarray
     pde: PDE
@@ -193,7 +195,8 @@ class EvolutionalNN(eqx.Module):
     get_gamma: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]
     
     @classmethod
-    def from_nn(cls, nn, pde, filter_spec=eqx.is_array):
+    def from_nn(cls, nn, pde, filter_spec=None):
+        filter_spec = get_filter_spec(nn) if filter_spec is None else filter_spec
         nn_param, nn_static = eqx.partition(nn, filter_spec)
         W, param_restruct = jax.flatten_util.ravel_pytree(nn_param)
         nnconstructor = NNconstructor(param_restruct, nn_static, filter_spec)
