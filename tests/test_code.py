@@ -232,7 +232,7 @@ def plot2D(fig, ax, func, xspan=(0,1), yspan=(0,1), ngrid=100):
     fig.colorbar(bar, ax=ax)
 
 
-    
+
 samp = Sampler(pde, nbatch)
 data = samp.samp_init(key)
 dinit = lambda x : - 2 * pde.params[0] * jnp.sin(x[0]) * jnp.sin(x[1])
@@ -305,6 +305,7 @@ def plot_error(ax, sol, evon, pde, u_true, label=None):
     ax.plot(sol.ts, err, color="black", label=None)
     ax.set_xlabel("t")
     ax.set_ylabel("Relative Error")
+    ax.set_yscale("log")
     return ax
 
 fig4, ax4 = plt.subplots()
