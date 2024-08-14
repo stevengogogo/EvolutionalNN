@@ -1,6 +1,6 @@
 #%%
 import jax 
-jax.config.update("jax_enable_x64", True)
+jax.config.update("jax_enable_x64", False)
 #jax.config.update("jax_debug_nans", True)
 import equinox as eqx
 import jax.numpy as jnp
@@ -105,10 +105,11 @@ class EvolutionalNN(eqx.Module):
         @jax.jit
         def ufunc(W, xs):
             _nn = nnconstructor(W)
-            us = jax.vmap(_nn)(xs)
+            u = lambda x: jnp.sum(_nn(x))
+            us = jax.vmap(u)(xs)
             return us   # u(W, x)
         
-        Jf =  jax.jacrev(ufunc, argnums=0)
+        Jf =  jax.jacfwd(ufunc, argnums=0)
 
         @jax.jit
         def get_N(W, xs): #[batch, dim]
@@ -120,7 +121,7 @@ class EvolutionalNN(eqx.Module):
         @jax.jit
         def get_J(W, xs):
             J = Jf(W, xs)
-            return J.reshape(xs.shape[0], len(W))
+            return J
 
         # Define gamma method
         get_gamma = None
@@ -175,6 +176,7 @@ class EvolutionalNN(eqx.Module):
         return self.new_w(W)
 
     def ode (self, t,y, args):
+        jax.debug.print("y : {y}", y=y)
         gamma = self.get_gamma(y, xs)
         jax.debug.print("Gamma : {gamma}", gamma=gamma)
         return gamma
@@ -223,7 +225,7 @@ evonnfit = evonn.fit_initial(nbatch, 30000, opt, key)
 
 #%%
 xspans = pde.xspan.T
-gen_xgrid = lambda xspan: jnp.linspace(xspan[0], xspan[1], 20)
+gen_xgrid = lambda xspan: jnp.linspace(xspan[0], xspan[1], 129)
 xs_grids = jax.vmap(gen_xgrid)(xspans)
 Xg = jnp.meshgrid(*xs_grids)
 xs = jnp.stack([Xg[i].ravel() for i in range(len(Xg))]).T
