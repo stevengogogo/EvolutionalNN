@@ -16,6 +16,7 @@ import matplotlib.pyplot as plt
 from functools import partial
 import diffrax as dfx
 import jaxopt
+import numpy as np
 
 
 class LinearSolver(eqx.Module):
@@ -33,10 +34,10 @@ class LinearSolver(eqx.Module):
             return jnp.linalg.solve(A, b, **kwargs)
 
         @jax.jit
-        def method_opt(A,b, initial_gamma=0):
-            loss = lambda x: jnp.mean(jnp.square(A @ x - b))
-            x = jaxopt.ScipyMinimize(loss, x0=initial_gamma, **kwargs)
-            return x
+        def method_opt(A,b, **kwags):
+            def matvec_A(x):
+                return  jnp.dot(A, x)
+            return jaxopt.linear_solve.solve_normal_cg(A, b, **kwags)
         
         if strategy == "inverse":
             method = method_inverse
@@ -46,8 +47,30 @@ class LinearSolver(eqx.Module):
             raise NotImplementedError(f"Strategy {strategy} not implemented")
 
         self.method = method
+    
+    def __call__(self, A, b, **kwargs):
+        return self.method(A, b, **kwargs)
 
 solvers = [LinearSolver(strategy="inverse"), 
            LinearSolver(strategy="gradient_descent", method="L-BFGS-B")]
 
 
+a = jr.normal(jr.PRNGKey(2), shape=(2, 5))
+b = jr.normal(jr.PRNGKey(1), shape=(2,))
+
+x1 = solvers[0](a.T @ a, a.T @ b)
+x2 = solvers[1](a.T @ a, a.T @ b)
+
+assert jnp.allclose(a.T @ a @x1, a.T @ b)
+# %%
+A = jr.normal(jr.PRNGKey(2), shape=(2, 5))
+b = jr.normal(jr.PRNGKey(1), shape=(2,))
+
+def matvec_A(x):
+  return  jnp.dot(A.T @ A, x)
+
+sol = jaxopt.linear_solve.solve_normal_cg(matvec_A, A.T @ b, tol=1e-5)
+print(sol)
+
+assert jnp.allclose(A.T @ A  @ sol, A.T @ b)
+# %%

@@ -56,6 +56,10 @@ class ParabolicPDE2D(PDE):
         v = self.params[0]
         Nx_func = lambda X: (uxx(X[0],X[1]) + uyy(X[0],X[1])) * v 
         return Nx_func
+    
+    def u_true(self, x, t):
+        # Analytical solution: sin(x)sin(y)exp(-2vt)
+        return jnp.sin(x[0]) * jnp.sin(x[1]) * jnp.exp(-2 * self.params[0] * t)
 
 class Sampler(eqx.Module):
     pde: PDE
@@ -97,7 +101,7 @@ class EvolutionalNN(eqx.Module):
     get_gamma: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]
     
     @classmethod
-    def from_nn(cls, nn, pde, filter_spec=eqx.is_array, gamma_method="inverse"):
+    def from_nn(cls, nn, pde, filter_spec=eqx.is_array):
         nn_param, nn_static = eqx.partition(nn, filter_spec)
         W, param_restruct = jax.flatten_util.ravel_pytree(nn_param)
         nnconstructor = NNconstructor(param_restruct, nn_static, filter_spec)
@@ -124,32 +128,14 @@ class EvolutionalNN(eqx.Module):
             return J
 
         # Define gamma method
-        get_gamma = None
-        if gamma_method == "inverse":
-            @jax.jit        
-            def get_gamma(W, xs):
-                J = get_J(W, xs)
-                N = get_N(W, xs)
-                gamma = jax.scipy.linalg.solve(J.T @ J, J.T @ N, assume_a="sym")
-                #gamma = jnp.linalg.solve(J.T @ J, J.T @ N)
-                return gamma
-        elif gamma_method == "optimization": 
-            @jax.jit
-            def gamma_loss(gamma, J, N):
-                errM = J.T @ J @ gamma - J.T @ N
-                errs = errM.ravel()
-                return jnp.mean(jnp.square(errs))
-
-            @jax.jit        
-            def get_gamma(W, xs, inital_gamma):
-                J = get_J(W, xs)
-                N = get_N(W, xs)
-                loss = lambda gamma: gamma_loss(gamma, J, N)
-                gamma = jaxopt.ScipyMinimize(loss, inital_gamma, method='L-BFGS-B')
-                return gamma
-                
-        else: 
-            raise ValueError("gamma_method must be either 'inverse' or 'optimization'")
+        @jax.jit        
+        def get_gamma(W, xs, tol=1e-5, **kwags):
+            J = get_J(W, xs)
+            N = get_N(W, xs)
+            matvec = lambda x: jnp.dot(J.T @ J, x)
+            gamma = jaxopt.linear_solve.solve_normal_cg(matvec, J.T @ N, tol=1e-5, **kwags)
+            return gamma
+            
 
         return cls(W, pde, nnconstructor, get_N, get_J, get_gamma)
     
@@ -172,13 +158,12 @@ class EvolutionalNN(eqx.Module):
             iter_step.set_postfix({'loss':loss})
             if loss < tol:
                 break
-        W = self.nnconstructor.get_w(nn)
-        return self.new_w(W)
+        return self.from_nn(nn, self.pde, self.nnconstructor.filter_spec)
 
     def ode (self, t,y, args):
-        jax.debug.print("y : {y}", y=y)
+        #jax.debug.print("y : {y}", y=y)
         gamma = self.get_gamma(y, xs)
-        jax.debug.print("Gamma : {gamma}", gamma=gamma)
+        #jax.debug.print("Gamma : {gamma}", gamma=gamma)
         return gamma
 
 
@@ -200,14 +185,6 @@ def loop2d(arr1, arr2, fun):
     fj = jax.vmap(funcex, in_axes=(0,0))
     fi = jax.vmap(fj, in_axes=(0,0))
     return fi(arr1, arr2).reshape(arr1.shape)
-
-def plot2D(fig, ax, func, xspan=(0,1), yspan=(0,1), ngrid=100):
-    x = jnp.linspace(*xspan, ngrid)
-    y = jnp.linspace(*yspan, ngrid)
-    X, Y = jnp.meshgrid(x, y)
-    Z =  loop2d(X, Y, func)
-    bar = ax.pcolor(X, Y, Z)
-    fig.colorbar(bar, ax=ax)
 
 # Setup PDE 
 key = jr.PRNGKey(0)
@@ -237,18 +214,25 @@ g = evonnfit.get_gamma(evonnfit.W, xs)
 print(g)
 
 #%% Evolve
-
-
 term = dfx.ODETerm(evonnfit.ode)
-solver = dfx.Euler()
-saveat = dfx.SaveAt(ts=jnp.linspace(pde.tspan[0], 0.01, 10))
-#stepsize_controller = dfx.PIDController(rtol=1e-6, atol=1e-6)
-sol = dfx.diffeqsolve(term, solver, t0=pde.tspan[0], t1=0.01, dt0=0.00001, y0=evonnfit.W, saveat=saveat, progress_meter=dfx.TqdmProgressMeter(refresh_steps=5),)
-
-print(sol.ys)  
+solver = dfx.Tsit5()
+stepsize_controller = dfx.PIDController(rtol=1e-4, atol=1e-4)
+saveat = dfx.SaveAt(ts=[0.1, 0.2, 0.4, pde.tspan[-1]])
+sol = dfx.diffeqsolve(term, solver, t0=pde.tspan[0], t1=pde.tspan[-1], dt0=0.01, y0=evonnfit.W, saveat=saveat, stepsize_controller=stepsize_controller, progress_meter=dfx.TqdmProgressMeter(refresh_steps=2),)
+#print(sol.ys)  
 #%%
 
 # Plotting
+import matplotlib as mpl
+def plot2D(fig, ax, func, xspan=(0,1), yspan=(0,1), ngrid=100):
+    x = jnp.linspace(*xspan, ngrid)
+    y = jnp.linspace(*yspan, ngrid)
+    X, Y = jnp.meshgrid(x, y)
+    Z =  loop2d(X, Y, func)
+    bar = ax.pcolor(X, Y, Z, cmap='seismic')
+    fig.colorbar(bar, ax=ax)
+
+    
 samp = Sampler(pde, nbatch)
 data = samp.samp_init(key)
 dinit = lambda x : - 2 * pde.params[0] * jnp.sin(x[0]) * jnp.sin(x[1])
@@ -268,4 +252,12 @@ axs[0].legend(loc='upper right')
 [a.set_xlabel('x') for a in axs.ravel()];
 [a.set_ylabel('y') for a in axs.ravel()];
 
+# %%
+for i, w in enumerate(sol.ys):
+    fig2, ax2 = plt.subplots(nrows=1, ncols=2, figsize=(15, 6))
+    plot2D(fig2, ax2[0], lambda x: pde.u_true(x, sol.ts[i]), pde.xspan[:, 0], pde.xspan[:, 1], ngrid=100)
+    plot2D(fig2, ax2[1], evonnfit.new_w(w).get_nn(), pde.xspan[:, 0], pde.xspan[:, 1], ngrid=100)
+    ax2[0].set_title(f"True N_x(u) at t = {sol.ts[i]}")
+    ax2[1].set_title(f"Predict N_x(u) at t = {sol.ts[i]}")
+    plt.show()
 # %%
