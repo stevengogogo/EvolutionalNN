@@ -178,21 +178,6 @@ def loss_fn(nn, data:Data):
     y_preds = jax.vmap(nn)(data.x)
     return jnp.mean(jnp.square(y_preds.ravel() - data.y.ravel()))
 
-
-@eqx.filter_jit
-def loop2d(arr1, arr2, fun):
-    funcex = jax.jit(lambda x,y: fun(jnp.stack([x,y])))
-    fj = jax.vmap(funcex, in_axes=(0,0))
-    fi = jax.vmap(fj, in_axes=(0,0))
-    return fi(arr1, arr2).reshape(arr1.shape)
-
-def plot2D(fig, ax, func, xspan=(0,1), yspan=(0,1), ngrid=100):
-    x = jnp.linspace(*xspan, ngrid)
-    y = jnp.linspace(*yspan, ngrid)
-    X, Y = jnp.meshgrid(x, y)
-    Z =  loop2d(X, Y, func)
-    bar = ax.pcolor(X, Y, Z, cmap='seismic')
-    fig.colorbar(bar, ax=ax)
     
 # Setup PDE 
 key = jr.PRNGKey(0)
@@ -231,6 +216,23 @@ sol = dfx.diffeqsolve(term, solver, t0=pde.tspan[0], t1=pde.tspan[-1], dt0=0.1, 
 #%%
 
 # Plotting
+@eqx.filter_jit
+def loop2d(arr1, arr2, fun):
+    funcex = jax.jit(lambda x,y: fun(jnp.stack([x,y])))
+    fj = jax.vmap(funcex, in_axes=(0,0))
+    fi = jax.vmap(fj, in_axes=(0,0))
+    return fi(arr1, arr2).reshape(arr1.shape)
+
+def plot2D(fig, ax, func, xspan=(0,1), yspan=(0,1), ngrid=100):
+    x = jnp.linspace(*xspan, ngrid)
+    y = jnp.linspace(*yspan, ngrid)
+    X, Y = jnp.meshgrid(x, y)
+    Z =  loop2d(X, Y, func)
+    bar = ax.pcolor(X, Y, Z, cmap='seismic')
+    fig.colorbar(bar, ax=ax)
+
+
+    
 samp = Sampler(pde, nbatch)
 data = samp.samp_init(key)
 dinit = lambda x : - 2 * pde.params[0] * jnp.sin(x[0]) * jnp.sin(x[1])
@@ -250,8 +252,8 @@ axs[0].legend(loc='upper right')
 [a.set_xlabel('x') for a in axs.ravel()];
 [a.set_ylabel('y') for a in axs.ravel()];
 
-# %% Plot comparison
-i = 2
+# %% Plot comparison in 2D
+i = 2 
 w = sol.ys[i]
 t = sol.ts[i]
 fig2, ax2 = plt.subplots(nrows=1, ncols=2, figsize=(15, 6))
@@ -261,26 +263,29 @@ plot2D(fig2, ax22[1], evonnfit.new_w(w).get_nn(), pde.xspan[:, 0], pde.xspan[:, 
 ax2[0].set_title(f"True N_x(u) at t = {t}")
 ax2[1].set_title(f"Predict N_x(u) at t = {t}")
 fig2.savefig("2dparabolic.png", dpi=300)
-# %% 
-y = 1.0
-xs = jnp.linspace(pde.xspan[0, 0], pde.xspan[1, 0], 100)
+
+# %% Plot comparison in section
+def plot_sections(ax, y, sol, evon, pde, u_true, label=None):
+    xs = jnp.linspace(pde.xspan[0, 0], pde.xspan[1, 0], 100)
+    for w, t in zip(sol.ys, sol.ts):
+
+        nn = evonnfit.new_w(w).get_nn()
+        u_trueF = lambda x: pde.u_true(jnp.array([x, y]), t)
+        u_predF = lambda x: jnp.sum(nn(jnp.array([x, y])))
+
+        u_true = jax.vmap(u_trueF)(xs)
+        u_pred = jax.vmap(u_predF)(xs)
+        ax3.plot(xs, u_true, color="black")
+        ax3.plot(xs, u_pred, color="red", linestyle="--")
+
+    ax3.plot(xs, u_true, color="black", label="Analytical Sol.")
+    ax3.plot(xs, u_pred, color="red", linestyle="--", label="Prediction")
+    ax3.legend()
+    ax3.set_xlabel("x")
+    ax3.set_ylabel("u")
+
 fig3, ax3 = plt.subplots()
-for w, t in zip(sol.ys, sol.ts):
-
-    nn = evonnfit.new_w(w).get_nn()
-    u_trueF = lambda x: pde.u_true(jnp.array([x, y]), t)
-    u_predF = lambda x: jnp.sum(nn(jnp.array([x, y])))
-
-    u_true = jax.vmap(u_trueF)(xs)
-    u_pred = jax.vmap(u_predF)(xs)
-    ax3.plot(xs, u_true, color="black")
-    ax3.plot(xs, u_pred, color="red", linestyle="--")
-
-ax3.plot(xs, u_true, color="black", label="Analytical Sol.")
-ax3.plot(xs, u_pred, color="red", linestyle="--", label="Prediction")
-ax3.legend()
-ax3.set_xlabel("x")
-ax3.set_ylabel("u")
+plot_sections(ax3, 1., sol, evonnfit, pde, pde.u_true)
 fig3.savefig("1dparabolic.png", dpi=300)
 
 #%% Error versus time
@@ -305,8 +310,5 @@ def plot_error(ax, sol, evon, pde, u_true, label=None):
 fig4, ax4 = plt.subplots()
 plot_error(ax4, sol, evonnfit, pde, pde.u_true)
 fig4.savefig(f"error.png", dpi=300)
-
-
-
 
 # %%
