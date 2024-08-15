@@ -36,91 +36,6 @@ class PDE(eqx.Module):
         raise NotImplementedError
 
 
-class DrichletNet(eqx.Module):
-    nn: eqx.Module
-    boundary_func: Callable[[jnp.ndarray], float]
-    get_x_bounds: Callable[[], jnp.ndarray]
-
-    def __init__(self, pde, nn, ngrid=10):
-        """Enforce Drichlet boundary condition
-            ngrid (int, optional): Bound points on each edge. Defaults to 2.
-        """
-        xspans = pde.xspan.T
-        xs_bound = gen_bound_points(pde.xspan, ngrid)
-
-        self.nn = nn 
-        self.boundary_func = pde.boundary_func
-        self.get_x_bounds = lambda : xs_bound
-
-    @staticmethod
-    @jax.jit
-    def get_coeffs(x, x_bounds):
-        As = jax.vmap(dist, in_axes=(None, 0))(x, x_bounds)
-        Asmut = jnp.prod(As) 
-        cs = jax.vmap(get_c, in_axes=(None, 0))(Asmut, As)
-        #jax.debug.print("cs: {cs}", cs=cs)
-        return cs
-    
-    @eqx.filter_jit
-    def __call__(self, x):
-        x_bounds = self.get_x_bounds() # shape (n, dim)
-        v_x = self.nn(x)
-        coeffs = self.get_coeffs(x, x_bounds).ravel()
-        v_x_bounds = jax.vmap(self.nn)(x_bounds).ravel()
-        return v_x + jnp.inner(coeffs, v_x_bounds) + self.boundary_func(x)
-
-    def get_filter_spec(self):
-        new_nn = eqx.filter(self.nn, eqx.is_array, replace=False)
-        new_nn = eqx.filter(new_nn, eqx.is_array, replace=True, inverse=True)
-        _filter_spec = jax.tree_util.tree_map(lambda _: False, self)
-        filter_spec = eqx.tree_at(lambda tree: tree.nn, _filter_spec, new_nn)
-        return filter_spec
-        
-
-def gen_bound_points(xspans, ngrid):
-    """Create points on boundaries
-
-    Args:
-        xspans: [[x_low, x_high], [y_low, y_high]]
-        ngrid: number of points on boundaries
-
-    Returns:
-        points: shape ((n-1)*dim, dim)
-    """
-    dim = xspans.shape[0]
-    xgridf = lambda xspan: jnp.linspace(xspan[0], xspan[1], ngrid).reshape(-1, 1)
-
-    def xcoordf(xspan, is_add_afters):
-        xgrid = xgridf(xspan)
-        points = jax.vmap(jax.vmap(add_val, in_axes=(None, 0, None)), in_axes=(None, 0, 0))(xgrid, xspans, is_add_afters)
-        return points
-
-    def add_val(x, val, is_after):
-        def add_before():
-            return jnp.concatenate([jnp.ones((x.shape[0], 1)) * val, x], axis=1)
-        
-        def add_after():
-            return jnp.concatenate([x, jnp.ones((x.shape[0], 1)) * val], axis=1)
-
-        return jax.lax.cond(is_after, add_after, add_before)
-
-    Is_add_afters = [jnp.concatenate((jnp.zeros((i,)), jnp.ones(((dim - int(i)),))), axis=0) for i in jnp.arange(dim)]
-    Is_add_afters = jnp.array(Is_add_afters)
-
-    xcoords = jax.vmap(xcoordf, in_axes=(0,0))(xspans, Is_add_afters)
-    xcoords = xcoords.reshape(-1, xspans.shape[0])
-    return jnp.unique(xcoords, axis=0)
-
-@jax.jit
-def dist(x1, x2):
-    """Measure Elucid distance between x1 and x2"""
-    return jnp.sum(jnp.square(x1 - x2))
-
-@jax.jit
-def get_c(Asprod_all, a):
-    Aprod = Asprod_all / a
-    return - (Aprod / (Aprod + a))
-
 
 class ParabolicPDE2D(PDE):
     params: jnp.ndarray #[v]
@@ -158,12 +73,51 @@ class Sampler(eqx.Module):
         self.batch = batch
         dim = pde.xspan.shape[0]
         
+        x_bound = self.gen_bound_points(pde.xspan, 600)
         def samp_init(key):
             x = jr.uniform(key, (batch, dim), minval=self.pde.xspan[:,0], maxval=self.pde.xspan[:,1])
             y = jax.vmap(self.pde.init_func)(x)
+
+            x = jnp.concatenate([x, x_bound], axis=0)
+            y = jnp.concatenate((y, jax.vmap(pde.boundary_func)(x_bound)), axis=0)
             return Data(x,y)
         
         self.samp_init = jax.jit(samp_init)
+
+    @staticmethod
+    def gen_bound_points(xspans, ngrid):
+        """Create points on boundaries
+
+        Args:
+            xspans: [[x_low, x_high], [y_low, y_high]]
+            ngrid: number of points on boundaries
+
+        Returns:
+            points: shape ((n-1)*dim, dim)
+        """
+        dim = xspans.shape[0]
+        xgridf = lambda xspan: jnp.linspace(xspan[0], xspan[1], ngrid).reshape(-1, 1)
+
+        def xcoordf(xspan, is_add_afters):
+            xgrid = xgridf(xspan)
+            points = jax.vmap(jax.vmap(add_val, in_axes=(None, 0, None)), in_axes=(None, 0, 0))(xgrid, xspans, is_add_afters)
+            return points
+
+        def add_val(x, val, is_after):
+            def add_before():
+                return jnp.concatenate([jnp.ones((x.shape[0], 1)) * val, x], axis=1)
+            
+            def add_after():
+                return jnp.concatenate([x, jnp.ones((x.shape[0], 1)) * val], axis=1)
+
+            return jax.lax.cond(is_after, add_after, add_before)
+
+        Is_add_afters = [jnp.concatenate((jnp.zeros((i,)), jnp.ones(((dim - int(i)),))), axis=0) for i in jnp.arange(dim)]
+        Is_add_afters = jnp.array(Is_add_afters)
+
+        xcoords = jax.vmap(xcoordf, in_axes=(0,0))(xspans, Is_add_afters)
+        xcoords = xcoords.reshape(-1, xspans.shape[0])
+        return jnp.unique(xcoords, axis=0)
 
 class NNconstructor(eqx.Module):
     param_restruct: Callable[[jnp.ndarray], jnp.ndarray]
@@ -180,12 +134,6 @@ class NNconstructor(eqx.Module):
         W, param_restruct = jax.flatten_util.ravel_pytree(nn_param)
         return W
 
-def get_filter_spec(nn):
-    if isinstance(nn, DrichletNet):
-        return nn.get_filter_spec()
-    else:
-        return eqx.is_array
-
 class EvolutionalNN(eqx.Module):
     W: jnp.ndarray
     pde: PDE
@@ -195,8 +143,7 @@ class EvolutionalNN(eqx.Module):
     get_gamma: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]
     
     @classmethod
-    def from_nn(cls, nn, pde, filter_spec=None):
-        filter_spec = get_filter_spec(nn) if filter_spec is None else filter_spec
+    def from_nn(cls, nn, pde, filter_spec=eqx.is_array):
         nn_param, nn_static = eqx.partition(nn, filter_spec)
         W, param_restruct = jax.flatten_util.ravel_pytree(nn_param)
         nnconstructor = NNconstructor(param_restruct, nn_static, filter_spec)
@@ -210,20 +157,20 @@ class EvolutionalNN(eqx.Module):
         
         Jf =  jax.jacfwd(ufunc, argnums=0)
 
-        #@jax.jit
+        @jax.jit
         def get_N(W, xs): #[batch, dim]
             # Spatial differential operator
             _nn = nnconstructor(W)
             nop = pde.spatial_diff_operator(_nn)
             return jax.vmap(nop)(xs)
         
-        #@jax.jit
+        @jax.jit
         def get_J(W, xs):
             J = Jf(W, xs)
             return J
 
         # Define gamma method
-        #@jax.jit        
+        @jax.jit        
         def get_gamma(W, xs, tol=1e-5, **kwags):
             J = get_J(W, xs)
             N = get_N(W, xs)
@@ -280,12 +227,11 @@ pde = ParabolicPDE2D(jnp.array([1.]), jnp.array([[-jnp.pi, jnp.pi], [-jnp.pi, jn
 
 #%%
 # Learn initial condition
-opt = optax.adam(learning_rate=optax.exponential_decay(1e-4, 3000, 0.9, end_value=1e-9))
+opt = optax.adam(learning_rate=optax.exponential_decay(1e-3, 3000, 0.9, end_value=1e-5))
 nbatch = 10000
 
-nn = DrichletNet(pde, eqx.nn.MLP(2, 1, 30, 4, activation=jnp.tanh,key=key), ngrid=3)
-evonn = EvolutionalNN.from_nn(nn, pde, nn.get_filter_spec())
-evonnfit = evonn.fit_initial(nbatch, 10000, opt, key)
+evonn = EvolutionalNN.from_nn(eqx.nn.MLP(2, 1, 30, 4, activation=jnp.tanh,key=key), pde)
+evonnfit = evonn.fit_initial(nbatch, 300000, opt, key)
 
 #%%
 xspans = pde.xspan
@@ -303,7 +249,7 @@ print(g)
 #%% Evolve
 term = dfx.ODETerm(evonnfit.ode)
 solver = dfx.Bosh3()
-stepsize_controller = dfx.PIDController(rtol=1e-5, atol=1e-5)
+stepsize_controller = dfx.PIDController(rtol=1e-4, atol=1e-4)
 saveat = dfx.SaveAt(ts=np.linspace(pde.tspan[0], pde.tspan[-1], 10).tolist())
 sol = dfx.diffeqsolve(term, solver, t0=pde.tspan[0], t1=pde.tspan[-1], dt0=0.1, y0=evonnfit.W, saveat=saveat, stepsize_controller=stepsize_controller, progress_meter=dfx.TqdmProgressMeter(refresh_steps=2))
 #print(sol.ys)  
@@ -312,9 +258,6 @@ sol = dfx.diffeqsolve(term, solver, t0=pde.tspan[0], t1=pde.tspan[-1], dt0=0.1, 
 # Plotting
 
 # Boundaries
-point = gen_bound_points(pde.xspan, 5)
-plt.scatter(point[:,0], point[:,1])
-
 @eqx.filter_jit
 def loop2d(arr1, arr2, fun):
     funcex = jax.jit(lambda x,y: fun(jnp.stack([x,y])))
@@ -351,7 +294,7 @@ axs[0].legend(loc='upper right')
 [a.set_xlabel('x') for a in axs.ravel()];
 [a.set_ylabel('y') for a in axs.ravel()];
 
-# %% Plot comparison in 2D
+# Plot comparison in 2D
 i = 2 
 w = sol.ys[i]
 t = sol.ts[i]
@@ -363,7 +306,7 @@ ax2[0].set_title(f"True N_x(u) at t = {t}")
 ax2[1].set_title(f"Predict N_x(u) at t = {t}")
 fig2.savefig("2dparabolic.png", dpi=300)
 
-# %% Plot comparison in section
+# Plot comparison in section
 def plot_sections(ax, y, sol, evon, pde, u_true, label=None):
     xs = jnp.linspace(*pde.xspan[0], 100)
     for w, t in zip(sol.ys, sol.ts):
@@ -387,19 +330,20 @@ fig3, ax3 = plt.subplots()
 plot_sections(ax3, 1., sol, evonnfit, pde, pde.u_true)
 fig3.savefig("1dparabolic.png", dpi=300)
 
-#%% Error versus time
+# Error versus time
 def plot_error(ax, sol, evon, pde, u_true, label=None):
     x = jnp.linspace(*pde.xspan[0], 100)
     y = jnp.linspace(*pde.xspan[1], 100)
     X, Y = jnp.meshgrid(x, y)
     XY = jnp.stack([X.ravel(), Y.ravel()]).T
+    u_true0 = jax.vmap(pde.u_true, in_axes=(0,None))(XY, 0)
     err = []
     for w,t in zip(sol.ys, sol.ts):
         nn = evonnfit.new_w(w).get_nn()
         u_predf = lambda x: jnp.sum(nn(x))
         u_true = jax.vmap(pde.u_true, in_axes=(0,None))(XY, t)
         u_pred = jax.vmap(u_predf)(XY)
-        error = jnp.linalg.norm(u_true - u_pred) / jnp.linalg.norm(u_true)
+        error = jnp.linalg.norm(u_true - u_pred) / jnp.linalg.norm(u_true0)
         err.append(error)
     ax.plot(sol.ts, err, color="black", label=None)
     ax.set_xlabel("t")
