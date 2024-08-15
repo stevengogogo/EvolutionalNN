@@ -1,6 +1,6 @@
 #%%
 import jax 
-jax.config.update("jax_enable_x64", False)
+jax.config.update("jax_enable_x64", True)
 #jax.config.update("jax_debug_nans", True)
 import equinox as eqx
 import numpy as np
@@ -220,6 +220,14 @@ def loss_fn(nn, data:Data):
     y_preds = jax.vmap(nn)(data.x)
     return jnp.mean(jnp.square(y_preds.ravel() - data.y.ravel()))
 
+class DrichletNN(eqx.Module):
+    nn: eqx.Module 
+    coeff: jnp.ndarray
+    def __init__(self, nn):
+        self.nn = nn
+        self.coeff = jnp.array([1.])
+    def __call__(self, x):
+        return self.coeff[0]**2 * (x[0]+jnp.pi) * (x[0] - jnp.pi) * (x[1] + jnp.pi) * (x[0] - jnp.pi) * self.nn(x)
     
 # Setup PDE 
 key = jr.PRNGKey(0)
@@ -229,13 +237,13 @@ pde = ParabolicPDE2D(jnp.array([1.]), jnp.array([[-jnp.pi, jnp.pi], [-jnp.pi, jn
 # Learn initial condition
 opt = optax.adam(learning_rate=optax.exponential_decay(1e-3, 3000, 0.9, end_value=1e-5))
 nbatch = 10000
-
-evonn = EvolutionalNN.from_nn(eqx.nn.MLP(2, 1, 30, 4, activation=jnp.tanh,key=key), pde)
-evonnfit = evonn.fit_initial(nbatch, 300000, opt, key)
+nn = DrichletNN(eqx.nn.MLP(2, 1, 20, 4, activation=jnp.tanh,key=key))
+evonn = EvolutionalNN.from_nn(nn, pde)
+evonnfit = evonn.fit_initial(nbatch, 120000, opt, key)
 
 #%%
 xspans = pde.xspan
-gen_xgrid = lambda xspan: jnp.linspace(xspan[0], xspan[1], 65)
+gen_xgrid = lambda xspan: jnp.linspace(xspan[0]+0.1, xspan[1]-0.1, 65)
 xs_grids = jax.vmap(gen_xgrid)(xspans)
 Xg = jnp.meshgrid(*xs_grids)
 xs = jnp.stack([Xg[i].ravel() for i in range(len(Xg))]).T
