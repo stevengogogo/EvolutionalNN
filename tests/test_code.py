@@ -1,7 +1,7 @@
 #%%
 import jax 
 jax.config.update("jax_enable_x64", False)
-jax.config.update("jax_debug_nans", True)
+#jax.config.update("jax_debug_nans", True)
 import equinox as eqx
 import numpy as np
 import jax.numpy as jnp
@@ -114,7 +114,7 @@ def gen_bound_points(xspans, ngrid):
 @jax.jit
 def dist(x1, x2):
     """Measure Elucid distance between x1 and x2"""
-    return jnp.linalg.norm(x1 - x2)
+    return jnp.sum(jnp.square(x1 - x2))
 
 @jax.jit
 def get_c(Asprod_all, a):
@@ -210,20 +210,20 @@ class EvolutionalNN(eqx.Module):
         
         Jf =  jax.jacfwd(ufunc, argnums=0)
 
-        @jax.jit
+        #@jax.jit
         def get_N(W, xs): #[batch, dim]
             # Spatial differential operator
             _nn = nnconstructor(W)
             nop = pde.spatial_diff_operator(_nn)
             return jax.vmap(nop)(xs)
         
-        @jax.jit
+        #@jax.jit
         def get_J(W, xs):
             J = Jf(W, xs)
             return J
 
         # Define gamma method
-        @jax.jit        
+        #@jax.jit        
         def get_gamma(W, xs, tol=1e-5, **kwags):
             J = get_J(W, xs)
             N = get_N(W, xs)
@@ -283,9 +283,9 @@ pde = ParabolicPDE2D(jnp.array([1.]), jnp.array([[-jnp.pi, jnp.pi], [-jnp.pi, jn
 opt = optax.adam(learning_rate=optax.exponential_decay(1e-4, 3000, 0.9, end_value=1e-9))
 nbatch = 10000
 
-nn = DrichletNet(pde, eqx.nn.MLP(2, 1, 30, 4, activation=jnp.tanh,key=key), ngrid=10)
+nn = DrichletNet(pde, eqx.nn.MLP(2, 1, 30, 4, activation=jnp.tanh,key=key), ngrid=3)
 evonn = EvolutionalNN.from_nn(nn, pde, nn.get_filter_spec())
-evonnfit = evonn.fit_initial(nbatch, 50000, opt, key)
+evonnfit = evonn.fit_initial(nbatch, 10000, opt, key)
 
 #%%
 xspans = pde.xspan
