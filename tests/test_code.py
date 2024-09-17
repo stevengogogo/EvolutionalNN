@@ -20,6 +20,7 @@ import numpy as np
 class Data(NamedTuple):
     x: jnp.ndarray
     y: jnp.ndarray
+    dy:jnp.ndarray
 
 class PDE(eqx.Module):
     params: jnp.ndarray # parameters of the PDE
@@ -72,52 +73,15 @@ class Sampler(eqx.Module):
         self.pde = pde
         self.batch = batch
         dim = pde.xspan.shape[0]
-        
-        x_bound = self.gen_bound_points(pde.xspan, 600)
+        dinit = pde.spatial_diff_operator(pde.init_func)
         def samp_init(key):
             x = jr.uniform(key, (batch, dim), minval=self.pde.xspan[:,0], maxval=self.pde.xspan[:,1])
             y = jax.vmap(self.pde.init_func)(x)
-
-            x = jnp.concatenate([x, x_bound], axis=0)
-            y = jnp.concatenate((y, jax.vmap(pde.boundary_func)(x_bound)), axis=0)
-            return Data(x,y)
+            dy = jax.vmap(dinit)(x)
+            return Data(x,y, dy)
         
         self.samp_init = jax.jit(samp_init)
 
-    @staticmethod
-    def gen_bound_points(xspans, ngrid):
-        """Create points on boundaries
-
-        Args:
-            xspans: [[x_low, x_high], [y_low, y_high]]
-            ngrid: number of points on boundaries
-
-        Returns:
-            points: shape ((n-1)*dim, dim)
-        """
-        dim = xspans.shape[0]
-        xgridf = lambda xspan: jnp.linspace(xspan[0], xspan[1], ngrid).reshape(-1, 1)
-
-        def xcoordf(xspan, is_add_afters):
-            xgrid = xgridf(xspan)
-            points = jax.vmap(jax.vmap(add_val, in_axes=(None, 0, None)), in_axes=(None, 0, 0))(xgrid, xspans, is_add_afters)
-            return points
-
-        def add_val(x, val, is_after):
-            def add_before():
-                return jnp.concatenate([jnp.ones((x.shape[0], 1)) * val, x], axis=1)
-            
-            def add_after():
-                return jnp.concatenate([x, jnp.ones((x.shape[0], 1)) * val], axis=1)
-
-            return jax.lax.cond(is_after, add_after, add_before)
-
-        Is_add_afters = [jnp.concatenate((jnp.zeros((i,)), jnp.ones(((dim - int(i)),))), axis=0) for i in jnp.arange(dim)]
-        Is_add_afters = jnp.array(Is_add_afters)
-
-        xcoords = jax.vmap(xcoordf, in_axes=(0,0))(xspans, Is_add_afters)
-        xcoords = xcoords.reshape(-1, xspans.shape[0])
-        return jnp.unique(xcoords, axis=0)
 
 class NNconstructor(eqx.Module):
     param_restruct: Callable[[jnp.ndarray], jnp.ndarray]
@@ -196,7 +160,7 @@ class EvolutionalNN(eqx.Module):
         for i in iter_step:
             k_batch, key = jr.split(key)
             data = sampler.samp_init(k_batch) # sample initial function
-            nn, state, loss = update_fn(nn, data, optimizer, state)
+            nn, state, loss = update_fn(nn, pde, data, optimizer, state)
             iter_step.set_postfix({'loss':loss})
             if loss < tol:
                 break
@@ -208,17 +172,26 @@ class EvolutionalNN(eqx.Module):
         #jax.debug.print("Gamma : {gamma}", gamma=gamma)
         return gamma
 
-
 @eqx.filter_jit
-def update_fn(nn: eqx.Module, data:Data, optimizer, state):
-    loss, grad = eqx.filter_value_and_grad(loss_fn)(nn, data)
+def update_fn(nn: eqx.Module, pde, data:Data, optimizer, state):
+    loss, grad = eqx.filter_value_and_grad(loss_pinn)(nn, pde, data)
     updates, new_state = optimizer.update(grad, state, nn)
     new_nn = eqx.apply_updates(nn, updates)
     return new_nn, new_state, loss
 
-def loss_fn(nn, data:Data):
+@eqx.filter_jit
+def loss_pinn(nn, pde, data:Data):
+    """
+    loss = MSE(y- nn) + MSE(dy-dnn)
+    """
+    dnn = pde.spatial_diff_operator(nn)
     y_preds = jax.vmap(nn)(data.x)
-    return jnp.mean(jnp.square(y_preds.ravel() - data.y.ravel()))
+    dy_preds = jax.vmap(dnn)(data.x)
+    return mse(data.y, y_preds) + mse(data.dy, dy_preds)
+
+@jax.jit
+def mse(y, y_pred):
+    return jnp.mean(jnp.square(y.ravel() - y_pred.ravel()))
 
 class DrichletNN(eqx.Module):
     nn: eqx.Module 
@@ -227,19 +200,29 @@ class DrichletNN(eqx.Module):
         self.nn = nn
         self.coeff = jnp.array([1.])
     def __call__(self, x):
-        return self.coeff[0]**2 * (x[0]+jnp.pi) * (x[0] - jnp.pi) * (x[1] + jnp.pi) * (x[0] - jnp.pi) * self.nn(x)
+        L = 2 * jnp.pi
+        omega = jnp.ones_like(x) * 2 * jnp.pi / L
+        embed_v = self.fourier_embed(x, omega)
+        return self.nn(embed_v)
     
+    def fourier_embed(self, x, w):
+        x_embed = x * w
+        cos_embed = jax.vmap(jnp.cos)(x_embed)
+        sin_embed = jax.vmap(jnp.sin)(x_embed)
+        return jnp.concatenate([cos_embed, sin_embed], axis=-1)
+
 # Setup PDE 
 key = jr.PRNGKey(0)
 pde = ParabolicPDE2D(jnp.array([1.]), jnp.array([[-jnp.pi, jnp.pi], [-jnp.pi, jnp.pi]]), jnp.array([0., 1.]))
 
 #%%
 # Learn initial condition
-opt = optax.adam(learning_rate=optax.exponential_decay(1e-3, 3000, 0.9, end_value=1e-5))
-nbatch = 10000
-nn = DrichletNN(eqx.nn.MLP(2, 1, 20, 4, activation=jnp.tanh,key=key))
+opt = optax.adam(learning_rate=optax.exponential_decay(1e-3, 2000, 0.9, end_value=1e-4))
+nbatch = 5000
+nn = DrichletNN(eqx.nn.MLP(2*2, 1, 30, 4, activation=jnp.tanh,key=key))
+#nn = eqx.nn.MLP(2, 1, 30, 4, activation=jnp.tanh,key=key)
 evonn = EvolutionalNN.from_nn(nn, pde)
-evonnfit = evonn.fit_initial(nbatch, 120000, opt, key)
+evonnfit = evonn.fit_initial(nbatch, 10_000, opt, key)
 
 #%%
 xspans = pde.xspan
