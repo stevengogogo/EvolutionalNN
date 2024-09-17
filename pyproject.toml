@@ -7,7 +7,24 @@ readme = "README.md"
 
 [tool.poetry.dependencies]
 python = "^3.10"
+jax = {extras = ["cuda12"], version = "^0.4.31"}
+numpy = "^2.0.1"
+equinox = "^0.11.4"
+jaxlib = "^0.4.31"
+tqdm = "^4.66.5"
+optim = "^0.1.0"
+optax = "^0.2.3"
+jaxopt = "^0.8.3"
+diffrax = "^0.6.0"
 
+
+[tool.poetry.group.dev.dependencies]
+ipykernel = "^6.29.5"
+
+
+[tool.poetry.group.extras.dependencies]
+matplotlib = "^3.9.1.post1"
+pytest = "^8.3.2"
 
 [build-system]
 requires = ["poetry-core"]
