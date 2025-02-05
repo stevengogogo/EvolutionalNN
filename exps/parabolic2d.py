@@ -135,7 +135,7 @@ class EvolutionalNN(eqx.Module):
 
         # Define gamma method
         @jax.jit        
-        def get_gamma(W, xs, tol=1e-5, **kwags):
+        def get_gamma(W, xs, tol=1e-4, **kwags):
             J = get_J(W, xs)
             N = get_N(W, xs)
             matvec = lambda x: jnp.dot(J.T @ J, x)
@@ -201,15 +201,11 @@ class DrichletNN(eqx.Module):
         self.coeff = jnp.array([1.])
     def __call__(self, x):
         L = 2 * jnp.pi
-        omega = jnp.ones_like(x) * 2 * jnp.pi / L
-        embed_v = self.fourier_embed(x, omega)
-        return self.nn(embed_v)
-    
-    def fourier_embed(self, x, w):
-        x_embed = x * w
-        cos_embed = jax.vmap(jnp.cos)(x_embed)
-        sin_embed = jax.vmap(jnp.sin)(x_embed)
-        return jnp.concatenate([cos_embed, sin_embed], axis=-1)
+        #l = lambda x,y: (jnp.pi - x) *  (x + jnp.pi) * (jnp.pi - y) *  (y + jnp.pi) 
+        l = lambda x,y: (1 - jnp.exp(-jnp.pi - x))*(1-jnp.exp(x-jnp.pi))*(1-jnp.exp(-jnp.pi - y))*(1-jnp.exp(y-jnp.pi))
+        out = self.nn(x) * l(x[0], x[1]) + 0.
+        return out
+
 
 # Setup PDE 
 key = jr.PRNGKey(0)
@@ -219,7 +215,7 @@ pde = ParabolicPDE2D(jnp.array([1.]), jnp.array([[-jnp.pi, jnp.pi], [-jnp.pi, jn
 # Learn initial condition
 opt = optax.adam(learning_rate=optax.exponential_decay(1e-3, 2000, 0.9, end_value=1e-4))
 nbatch = 5000
-nn = DrichletNN(eqx.nn.MLP(2*2, 1, 30, 4, activation=jnp.tanh,key=key))
+nn = DrichletNN(eqx.nn.MLP(2, 1, 20, 4, activation=jnp.tanh,key=key))
 #nn = eqx.nn.MLP(2, 1, 30, 4, activation=jnp.tanh,key=key)
 evonn = EvolutionalNN.from_nn(nn, pde)
 evonnfit = evonn.fit_initial(nbatch, 10_000, opt, key)

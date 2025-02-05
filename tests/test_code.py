@@ -105,9 +105,10 @@ class EvolutionalNN(eqx.Module):
     get_N: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]
     get_J: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]
     get_gamma: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]
+    tol: float
     
     @classmethod
-    def from_nn(cls, nn, pde, filter_spec=eqx.is_array):
+    def from_nn(cls, nn, pde, filter_spec=eqx.is_array, tol=1e-6):
         nn_param, nn_static = eqx.partition(nn, filter_spec)
         W, param_restruct = jax.flatten_util.ravel_pytree(nn_param)
         nnconstructor = NNconstructor(param_restruct, nn_static, filter_spec)
@@ -135,15 +136,15 @@ class EvolutionalNN(eqx.Module):
 
         # Define gamma method
         @jax.jit        
-        def get_gamma(W, xs, tol=1e-5, **kwags):
+        def get_gamma(W, xs, tol=1e-4, **kwags):
             J = get_J(W, xs)
             N = get_N(W, xs)
             matvec = lambda x: jnp.dot(J.T @ J, x)
-            gamma = jaxopt.linear_solve.solve_normal_cg(matvec, J.T @ N, tol=1e-5, **kwags)
+            gamma = jaxopt.linear_solve.solve_normal_cg(matvec, J.T @ N, tol=tol, **kwags)
             return gamma
             
 
-        return cls(W, pde, nnconstructor, get_N, get_J, get_gamma)
+        return cls(W, pde, nnconstructor, get_N, get_J, get_gamma, tol)
     
     def new_w(self, W):
         return EvolutionalNN(W, self.pde, self.nnconstructor, self.get_N, self.get_J, self.get_gamma)
@@ -168,7 +169,7 @@ class EvolutionalNN(eqx.Module):
 
     def ode (self, t,y, args):
         #jax.debug.print("y : {y}", y=y)
-        gamma = self.get_gamma(y, xs)
+        gamma = self.get_gamma(y, xs, tol=self.tol)
         #jax.debug.print("Gamma : {gamma}", gamma=gamma)
         return gamma
 
