@@ -285,12 +285,13 @@ pde = ParabolicPDE1D(jnp.array([0.05]), jnp.array([[0., 1]]), jnp.array([0., 1.]
 # Learn initial condition
 opt = optax.adam(learning_rate=optax.exponential_decay(1e-3, 2000, 0.9, end_value=1e-4))
 nbatch = 5000
-nn = DrichletNN(eqx.nn.MLP(2, 1, 10, 4, activation=jnp.tanh,key=jax.random.PRNGKey(0)))
+#nn = DrichletNN(eqx.nn.MLP(2, 1, 10, 4, activation=jnp.tanh,key=jax.random.PRNGKey(0)))
+nn = eqx.nn.MLP(1, 1, 10, 4, activation=jnp.tanh,key=jax.random.PRNGKey(0))
 evonn = EvolutionalNN.from_nn(nn, pde)
 time_str = time()
 _evonnfit = evonn.fit_initial(nbatch, 10_000, opt, key)
-#
-nn2 = DrichletNN(_evonnfit.get_nn().nn)
+#%%
+nn2 = _evonnfit.get_nn()
 evonnfit = EvolutionalNN.from_nn(nn2, pde)
 xspans = pde.xspan
 gen_xgrid = lambda xspan: jnp.linspace(xspan[0]+1e-4, xspan[1]-1e-4, 300)
@@ -316,7 +317,10 @@ print("Time elapsed: ", end_time - time_str)
 print("Time elapsed for evolution: ", end_time - str2_time)
 
 #%%
+fig, ax = plt.subplots()
+plot_sections(ax, 1., sol, evonnfit, pde, pde.u_true)
 fig5, ax5 = plt.subplots()
 _, err_nn = plot_error(ax5, sol, evonnfit, pde, pde.u_true)
 print("Number of parameters: ", evonnfit.W.shape[0])
+
 # %%
