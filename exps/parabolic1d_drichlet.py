@@ -118,18 +118,18 @@ class EvolutionalNN(eqx.Module):
         @jax.jit
         def ufunc(W, xs):
             _nn = nnconstructor(W)
-            u = lambda x: jnp.sum(_nn(x))
-            us = jax.vmap(u)(xs)
+            us = jax.vmap(_nn)(xs)
             return us   # u(W, x)
         
-        Jf =  jax.jacfwd(ufunc, argnums=0)
+        Jf =  lambda W, xs: jax.jacfwd(ufunc, argnums=0)(W, xs).transpose(1,0,2) # (W, x) -> J(W, x) (dout, Nu, Nw)
 
         @jax.jit
         def get_N(W, xs): #[batch, dim]
             # Spatial differential operator
             _nn = nnconstructor(W)
             nop = pde.spatial_diff_operator(_nn)
-            return jax.vmap(nop)(xs)
+            nu = xs.shape[0]
+            return jax.vmap(nop)(xs).reshape(nu, -1) # Nu x dout
         
         @jax.jit
         def get_J(W, xs):
@@ -140,9 +140,12 @@ class EvolutionalNN(eqx.Module):
         @jax.jit        
         def get_gamma(W, xs, tol=1e-4, **kwags):
             J = get_J(W, xs)
+            Jt = J.transpose(0, 2, 1)
             N = get_N(W, xs)
-            matvec = lambda x: jnp.dot(J.T @ J, x)
-            gamma = jaxopt.linear_solve.solve_normal_cg(matvec, J.T @ N, tol=tol, **kwags)
+            A = jnp.sum(Jt @ J, axis=0) 
+            b = jnp.sum(jnp.sum(Jt @ N, axis=0), axis=-1)
+            matvec = lambda x: jnp.dot(A, x)
+            gamma = jaxopt.linear_solve.solve_normal_cg(matvec, b, tol=tol, **kwags)
             return gamma
             
 
@@ -255,8 +258,6 @@ def plot_error(ax, sol, evon, pde, u_true, label=None):
     ax.set_yscale("log")
     return ax, err
 
-
-#%%
 if __name__ == "__main__":
     """
     Neural Network
