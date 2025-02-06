@@ -166,7 +166,7 @@ class EvolutionalNN(eqx.Module):
         for i in iter_step:
             k_batch, key = jr.split(key)
             data = sampler.samp_init(k_batch) # sample initial function
-            nn, state, loss = update_fn(nn, pde, data, optimizer, state)
+            nn, state, loss = update_fn(nn, self.pde, data, optimizer, state)
             iter_step.set_postfix({'loss':loss})
             if loss < tol:
                 break
