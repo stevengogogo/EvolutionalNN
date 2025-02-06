@@ -85,24 +85,6 @@ class Sampler(eqx.Module):
         
         self.samp_init = jax.jit(samp_init)
 
-def set_bumpnet(pde:PDE, nxbump:int, nybump:int):
-    xspan = pde.xspan[0]
-    yspan = pde.xspan[1]
-    xs, dx = jnp.linspace(*xspan, nxbump, retstep=True)
-    ys, dy = jnp.linspace(*yspan, nybump, retstep=True)
-
-    xvs, yvs = jnp.meshgrid(xs, ys)
-    xvs = xvs.ravel()
-    yvs = yvs.ravel()
-    
-    dxs = jnp.ones_like(xvs) * dx * 1. # avoid overlap
-    dys = jnp.ones_like(yvs) * dy * 1.
-
-    net = model.Bump2DPredConfinedCenter.fromGeometry(xvs, yvs,  dxs, dys, xspan, yspan)
-    filter_spec = model.freeze_domain(net)
-
-    return net, filter_spec
-
 
 class NNconstructor(eqx.Module):
     param_restruct: Callable[[jnp.ndarray], jnp.ndarray]
