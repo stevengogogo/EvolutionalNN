@@ -115,10 +115,10 @@ class EvolutionalNN(eqx.Module):
         @jax.jit
         def ufunc(W, xs):
             _nn = nnconstructor(W)
-            us = jax.vmap(_nn)(xs)
+            us = _nn(xs)
             return us   # u(W, x)
         
-        Jf =  lambda W, xs: jax.jacfwd(ufunc, argnums=0)(W, xs).transpose(1,0,2) # (W, x) -> J(W, x) (dout, Nu, Nw)
+        Jf =  lambda W, xs: jax.vmap(jax.jacrev(ufunc, argnums=0), in_axes=(None, 0))(W, xs).transpose(1,0,2) # (W, x) -> J(W, x) (dout, Nu, Nw)
 
         @jax.jit
         def get_N(W, xs): #[batch, dim]
