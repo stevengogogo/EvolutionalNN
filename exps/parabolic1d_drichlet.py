@@ -21,7 +21,6 @@ import numpy as np
 class Data(NamedTuple):
     x: jnp.ndarray
     y: jnp.ndarray
-    dy:jnp.ndarray
 
 class PDE(eqx.Module):
     params: jnp.ndarray # parameters of the PDE
@@ -80,8 +79,7 @@ class Sampler(eqx.Module):
         def samp_init(key):
             x = jr.uniform(key, (batch, dim), minval=self.pde.xspan[:,0], maxval=self.pde.xspan[:,1])
             y = jax.vmap(self.pde.init_func)(x)
-            dy = jax.vmap(dinit)(x)
-            return Data(x,y, dy)
+            return Data(x,y)
         
         self.samp_init = jax.jit(samp_init)
 
@@ -192,8 +190,8 @@ def loss_pinn(nn, pde, data:Data):
     """
     dnn = pde.spatial_diff_operator(nn)
     y_preds = jax.vmap(nn)(data.x)
-    dy_preds = jax.vmap(dnn)(data.x)
-    return mse(data.y, y_preds) + mse(data.dy, dy_preds)
+    #dy_preds = jax.vmap(dnn)(data.x)
+    return mse(data.y, y_preds) #+ mse(data.dy, dy_preds)
 
 @jax.jit
 def mse(y, y_pred):
