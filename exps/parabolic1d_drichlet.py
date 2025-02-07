@@ -75,7 +75,6 @@ class Sampler(eqx.Module):
         self.pde = pde
         self.batch = batch
         dim = pde.xspan.shape[0]
-        dinit = pde.spatial_diff_operator(pde.init_func)
         def samp_init(key):
             x = jr.uniform(key, (batch, dim), minval=self.pde.xspan[:,0], maxval=self.pde.xspan[:,1])
             y = jax.vmap(self.pde.init_func)(x)

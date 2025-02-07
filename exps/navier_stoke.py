@@ -69,7 +69,7 @@ class DivergenceFreeNN2D(eqx.Module):
     nn: eqx.Module # input: 2 -> output: 1
 
     def __init__(self, width_size, depth, key, **kwargs):
-        self.nn = eqx.nn.MLP(in_size=2, out_size=1, width_size=width_size, depth=depth, key=key, **kwargs)
+        self.nn = eqx.nn.MLP(in_size=2, out_size=1, width_size=width_size, depth=depth, key=key, activation=jax.nn.tanh, **kwargs)
     
     def __call__(self, x):
         func = lambda x,y: jnp.sum(self.nn(jnp.array([x, y])))
@@ -85,15 +85,16 @@ class DivergenceFreeNN2D(eqx.Module):
 
 
 key = jr.PRNGKey(0)
-nbatch = 500
+nbatch = 1000
 nstep = 10000
 pde = TaylorGreenVortex2D(params=jnp.array([1, 1.]), 
                           xspan=jnp.array([[0., 2*jnp.pi], [0, 2*jnp.pi]]), 
                           tspan=jnp.array([0., 1.]))
 
-opt = optax.adam(learning_rate=optax.exponential_decay(1e-3, 2000, 0.9, end_value=1e-4))
+opt = optax.adam(learning_rate=optax.exponential_decay(1e-4, 1000, 0.9))
 
-nn = DivergenceFreeNN2D(width_size=10, depth=2, key=key)
+nn = DivergenceFreeNN2D(width_size=30, depth=4, key=key)
+#nn = eqx.nn.MLP(2, 2, 10, 4, activation=jnp.tanh,key=jax.random.PRNGKey(0))
 evonn = EvolutionalNN.from_nn(nn, pde)
 _evonnfit = evonn.fit_initial(nbatch, nstep, opt, key)
 # %%
