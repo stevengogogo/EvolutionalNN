@@ -7,6 +7,9 @@ import jax.numpy as jnp
 import jax.random as jr
 import equinox as eqx
 import optax
+import diffrax as dfx
+from time import time
+import numpy as np
 import jax
 from parabolic1d_drichlet import PDE, EvolutionalNN  
 
@@ -86,7 +89,7 @@ class DivergenceFreeNN2D(eqx.Module):
 
 key = jr.PRNGKey(0)
 nbatch = 1000
-nstep = 10000
+nstep = 6000
 pde = TaylorGreenVortex2D(params=jnp.array([1, 1.]), 
                           xspan=jnp.array([[0., 2*jnp.pi], [0, 2*jnp.pi]]), 
                           tspan=jnp.array([0., 1.]))
@@ -96,5 +99,33 @@ opt = optax.adam(learning_rate=optax.exponential_decay(1e-4, 1000, 0.9))
 nn = DivergenceFreeNN2D(width_size=30, depth=4, key=key)
 #nn = eqx.nn.MLP(2, 2, 10, 4, activation=jnp.tanh,key=jax.random.PRNGKey(0))
 evonn = EvolutionalNN.from_nn(nn, pde)
-_evonnfit = evonn.fit_initial(nbatch, nstep, opt, key)
+evonnfit = evonn.fit_initial(nbatch, nstep, opt, key)
+# %%
+
+xspans = pde.xspan
+gen_xgrid = lambda xspan: jnp.linspace(xspan[0]+1e-4, xspan[1]-1e-4, 33)
+xs_grids = jax.vmap(gen_xgrid)(xspans)
+Xg = jnp.meshgrid(*xs_grids)
+xs = jnp.stack([Xg[i].ravel() for i in range(len(Xg))]).T
+#%%
+N = evonnfit.get_N(evonnfit.W, xs)
+
+#%%
+J = evonnfit.get_J(evonnfit.W, xs)
+#%%
+g = evonnfit.get_gamma(evonnfit.W, xs)
+#print(g)
+# %%
+# Evolve
+term = dfx.ODETerm(evonnfit.ode)
+solver = dfx.Euler()
+#stepsize_controller = dfx.PIDController(rtol=1e-4, atol=1e-4)
+t1 = 1
+stepsize_controller = dfx.ConstantStepSize()
+saveat = dfx.SaveAt(ts=np.linspace(pde.tspan[0], t1, 100).tolist())
+str2_time = time()
+sol = dfx.diffeqsolve(term, solver, t0=pde.tspan[0], t1=t1, dt0=0.001, y0=evonnfit.W, saveat=saveat, stepsize_controller=stepsize_controller, progress_meter=dfx.TqdmProgressMeter(refresh_steps=2))
+end_time = time()
+#print("Time elapsed: ", end_time - time_str)
+#print("Time elapsed for evolution: ", end_time - str2_time)
 # %%
