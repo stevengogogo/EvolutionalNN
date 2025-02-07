@@ -87,11 +87,11 @@ class DivergenceFreeNN2D(eqx.Module):
 key = jr.PRNGKey(0)
 nbatch = 500
 nstep = 10000
-pde = TaylorGreenVortex2D(params=jnp.array([0.1, 1.]), 
+pde = TaylorGreenVortex2D(params=jnp.array([1, 1.]), 
                           xspan=jnp.array([[0., 2*jnp.pi], [0, 2*jnp.pi]]), 
                           tspan=jnp.array([0., 1.]))
 
-opt = optax.adam(learning_rate=optax.exponential_decay(1e-2, 2000, 0.9, end_value=1e-4))
+opt = optax.adam(learning_rate=optax.exponential_decay(1e-3, 2000, 0.9, end_value=1e-4))
 
 nn = DivergenceFreeNN2D(width_size=10, depth=2, key=key)
 evonn = EvolutionalNN.from_nn(nn, pde)
