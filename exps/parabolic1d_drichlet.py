@@ -168,12 +168,14 @@ class EvolutionalNN(eqx.Module):
             if loss < tol:
                 break
         return self.from_nn(nn, self.pde, self.nnconstructor.filter_spec)
-
-    def ode(self, t,y, args):
-        #jax.debug.print("y : {y}", y=y)
-        gamma = self.get_gamma(y, xs)
-        #jax.debug.print("Gamma : {gamma}", gamma=gamma)
-        return gamma
+    
+    def get_ode(self, xs):
+        def ode(t,y, args):
+            #jax.debug.print("y : {y}", y=y)
+            gamma = self.get_gamma(y, xs)
+            #jax.debug.print("Gamma : {gamma}", gamma=gamma)
+            return gamma
+        return ode
 
 @eqx.filter_jit
 def update_fn(nn: eqx.Module, pde, data:Data, optimizer, state):
@@ -284,7 +286,8 @@ if __name__ == "__main__":
     #print(g)
 
     # Evolve
-    term = dfx.ODETerm(evonnfit.ode)
+    ode = evonnfit.get_ode(xs)
+    term = dfx.ODETerm(ode)
     solver = dfx.Euler()
     #stepsize_controller = dfx.PIDController(rtol=1e-4, atol=1e-4)
     t1 = 1

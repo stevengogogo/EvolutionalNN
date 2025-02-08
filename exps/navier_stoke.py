@@ -117,7 +117,7 @@ g = evonnfit.get_gamma(evonnfit.W, xs)
 #print(g)
 # %%
 # Evolve
-term = dfx.ODETerm(evonnfit.ode)
+term = dfx.ODETerm(evonnfit.get_ode(xs))
 solver = dfx.Euler()
 #stepsize_controller = dfx.PIDController(rtol=1e-4, atol=1e-4)
 t1 = 1
