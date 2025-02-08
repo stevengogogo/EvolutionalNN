@@ -89,7 +89,7 @@ class DivergenceFreeNN2D(eqx.Module):
 
 key = jr.PRNGKey(0)
 nbatch = 1000
-nstep = 6000
+nstep = 10000
 pde = TaylorGreenVortex2D(params=jnp.array([1, 1.]), 
                           xspan=jnp.array([[0., 2*jnp.pi], [0, 2*jnp.pi]]), 
                           tspan=jnp.array([0., 1.]))
@@ -128,4 +128,41 @@ sol = dfx.diffeqsolve(term, solver, t0=pde.tspan[0], t1=t1, dt0=0.001, y0=evonnf
 end_time = time()
 #print("Time elapsed: ", end_time - time_str)
 #print("Time elapsed for evolution: ", end_time - str2_time)
+#%%
+import matplotlib.pyplot as plt
+@eqx.filter_jit
+def loop2d(arr1, arr2, fun):
+    funcex = jax.jit(lambda x,y: fun(jnp.stack([x,y])))
+    fj = jax.vmap(funcex, in_axes=(0,0))
+    fi = jax.vmap(fj, in_axes=(0,0))
+    return fi(arr1, arr2)
+w = 3
+Y, X = np.mgrid[-w:w:100j, -w:w:100j]
+UV = u_true(X, Y, 0, 1., 1.)
+U = UV[0]
+V = UV[1]
+speed = np.sqrt(U**2 + V**2)
+lw = 5*speed / speed.max()
+
+fig, axs = plt.subplots()
+#  Varying density along a streamline
+axs.streamplot(X, Y, U, V, density=[0.5, 1], cmap='autumn', linewidth=lw)
+axs.set_title('Varying Density')
+# %%
+i = 0
+t = sol.ts[i]
+nn = evonnfit.new_w(sol.ys[i,:]).get_nn()
+
+Z =  loop2d(X, Y, nn)
+
+U_nn = Z[:,:,0]
+V_nn = Z[:,:,1]
+
+speed = np.sqrt(U_nn**2 + V_nn**2)
+lw = 5*speed / speed.max()
+
+fig, axs = plt.subplots()
+#  Varying density along a streamline
+axs.streamplot(X, Y, U_nn, V_nn, density=[0.5, 1], cmap='autumn', linewidth=lw)
+axs.set_title('Varying Density')
 # %%
