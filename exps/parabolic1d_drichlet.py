@@ -21,7 +21,6 @@ import numpy as np
 class Data(NamedTuple):
     x: jnp.ndarray
     y: jnp.ndarray
-    dy:jnp.ndarray
 
 class PDE(eqx.Module):
     params: jnp.ndarray # parameters of the PDE
@@ -76,32 +75,12 @@ class Sampler(eqx.Module):
         self.pde = pde
         self.batch = batch
         dim = pde.xspan.shape[0]
-        dinit = pde.spatial_diff_operator(pde.init_func)
         def samp_init(key):
             x = jr.uniform(key, (batch, dim), minval=self.pde.xspan[:,0], maxval=self.pde.xspan[:,1])
             y = jax.vmap(self.pde.init_func)(x)
-            dy = jax.vmap(dinit)(x)
-            return Data(x,y, dy)
+            return Data(x,y)
         
         self.samp_init = jax.jit(samp_init)
-
-def set_bumpnet(pde:PDE, nxbump:int, nybump:int):
-    xspan = pde.xspan[0]
-    yspan = pde.xspan[1]
-    xs, dx = jnp.linspace(*xspan, nxbump, retstep=True)
-    ys, dy = jnp.linspace(*yspan, nybump, retstep=True)
-
-    xvs, yvs = jnp.meshgrid(xs, ys)
-    xvs = xvs.ravel()
-    yvs = yvs.ravel()
-    
-    dxs = jnp.ones_like(xvs) * dx * 1. # avoid overlap
-    dys = jnp.ones_like(yvs) * dy * 1.
-
-    net = model.Bump2DPredConfinedCenter.fromGeometry(xvs, yvs,  dxs, dys, xspan, yspan)
-    filter_spec = model.freeze_domain(net)
-
-    return net, filter_spec
 
 
 class NNconstructor(eqx.Module):
@@ -136,18 +115,18 @@ class EvolutionalNN(eqx.Module):
         @jax.jit
         def ufunc(W, xs):
             _nn = nnconstructor(W)
-            u = lambda x: jnp.sum(_nn(x))
-            us = jax.vmap(u)(xs)
+            us = _nn(xs)
             return us   # u(W, x)
         
-        Jf =  jax.jacfwd(ufunc, argnums=0)
+        Jf =  lambda W, xs: jax.vmap(jax.jacrev(ufunc, argnums=0), in_axes=(None, 0))(W, xs).transpose(1,0,2) # (W, x) -> J(W, x) (dout, Nu, Nw)
 
         @jax.jit
         def get_N(W, xs): #[batch, dim]
             # Spatial differential operator
             _nn = nnconstructor(W)
             nop = pde.spatial_diff_operator(_nn)
-            return jax.vmap(nop)(xs)
+            nu = xs.shape[0]
+            return jax.vmap(nop)(xs).reshape(nu, -1) # Nu x dout
         
         @jax.jit
         def get_J(W, xs):
@@ -158,9 +137,12 @@ class EvolutionalNN(eqx.Module):
         @jax.jit        
         def get_gamma(W, xs, tol=1e-4, **kwags):
             J = get_J(W, xs)
+            Jt = J.transpose(0, 2, 1)
             N = get_N(W, xs)
-            matvec = lambda x: jnp.dot(J.T @ J, x)
-            gamma = jaxopt.linear_solve.solve_normal_cg(matvec, J.T @ N, tol=tol, **kwags)
+            A = jnp.sum(Jt @ J, axis=0) 
+            b = jnp.sum(jnp.sum(Jt @ N, axis=0), axis=-1)
+            matvec = lambda x: jnp.dot(A, x)
+            gamma = jaxopt.linear_solve.solve_normal_cg(matvec, b, tol=tol, **kwags)
             return gamma
             
 
@@ -181,17 +163,19 @@ class EvolutionalNN(eqx.Module):
         for i in iter_step:
             k_batch, key = jr.split(key)
             data = sampler.samp_init(k_batch) # sample initial function
-            nn, state, loss = update_fn(nn, pde, data, optimizer, state)
+            nn, state, loss = update_fn(nn, self.pde, data, optimizer, state)
             iter_step.set_postfix({'loss':loss})
             if loss < tol:
                 break
         return self.from_nn(nn, self.pde, self.nnconstructor.filter_spec)
-
-    def ode(self, t,y, args):
-        #jax.debug.print("y : {y}", y=y)
-        gamma = self.get_gamma(y, xs)
-        #jax.debug.print("Gamma : {gamma}", gamma=gamma)
-        return gamma
+    
+    def get_ode(self, xs):
+        def ode(t,y, args):
+            #jax.debug.print("y : {y}", y=y)
+            gamma = self.get_gamma(y, xs)
+            #jax.debug.print("Gamma : {gamma}", gamma=gamma)
+            return gamma
+        return ode
 
 @eqx.filter_jit
 def update_fn(nn: eqx.Module, pde, data:Data, optimizer, state):
@@ -207,8 +191,8 @@ def loss_pinn(nn, pde, data:Data):
     """
     dnn = pde.spatial_diff_operator(nn)
     y_preds = jax.vmap(nn)(data.x)
-    dy_preds = jax.vmap(dnn)(data.x)
-    return mse(data.y, y_preds) + mse(data.dy, dy_preds)
+    #dy_preds = jax.vmap(dnn)(data.x)
+    return mse(data.y, y_preds) #+ mse(data.dy, dy_preds)
 
 @jax.jit
 def mse(y, y_pred):
@@ -273,54 +257,53 @@ def plot_error(ax, sol, evon, pde, u_true, label=None):
     ax.set_yscale("log")
     return ax, err
 
+if __name__ == "__main__":
+    """
+    Neural Network
+    """
+    key = jr.PRNGKey(0)
+    pde = ParabolicPDE1D(jnp.array([0.05]), jnp.array([[0., 1]]), jnp.array([0., 1.]))
 
-"""
-Neural Network
-"""
-# %%
-key = jr.PRNGKey(0)
-pde = ParabolicPDE1D(jnp.array([0.05]), jnp.array([[0., 1]]), jnp.array([0., 1.]))
 
+    # Learn initial condition
+    opt = optax.adam(learning_rate=optax.exponential_decay(1e-3, 2000, 0.9, end_value=1e-4))
+    nbatch = 5000
+    nn = DrichletNN(eqx.nn.MLP(2, 1, 10, 4, activation=jnp.tanh,key=jax.random.PRNGKey(0)))
+    #nn = eqx.nn.MLP(1, 1, 10, 4, activation=jnp.tanh,key=jax.random.PRNGKey(0))
+    evonn = EvolutionalNN.from_nn(nn, pde)
+    time_str = time()
+    _evonnfit = evonn.fit_initial(nbatch, 10_000, opt, key)
+    nn2 = _evonnfit.get_nn()
+    evonnfit = EvolutionalNN.from_nn(nn2, pde)
+    xspans = pde.xspan
+    gen_xgrid = lambda xspan: jnp.linspace(xspan[0]+1e-4, xspan[1]-1e-4, 300)
+    xs_grids = jax.vmap(gen_xgrid)(xspans)
+    Xg = jnp.meshgrid(*xs_grids)
+    xs = jnp.stack([Xg[i].ravel() for i in range(len(Xg))]).T
+    #evonnfit.get_N(evonnfit.W, xs)
+    #evonnfit.get_J(evonnfit.W, xs)
+    #g = evonnfit.get_gamma(evonnfit.W, xs)
+    #print(g)
 
-# Learn initial condition
-opt = optax.adam(learning_rate=optax.exponential_decay(1e-3, 2000, 0.9, end_value=1e-4))
-nbatch = 5000
-#nn = DrichletNN(eqx.nn.MLP(2, 1, 10, 4, activation=jnp.tanh,key=jax.random.PRNGKey(0)))
-nn = eqx.nn.MLP(1, 1, 10, 4, activation=jnp.tanh,key=jax.random.PRNGKey(0))
-evonn = EvolutionalNN.from_nn(nn, pde)
-time_str = time()
-_evonnfit = evonn.fit_initial(nbatch, 10_000, opt, key)
-#%%
-nn2 = _evonnfit.get_nn()
-evonnfit = EvolutionalNN.from_nn(nn2, pde)
-xspans = pde.xspan
-gen_xgrid = lambda xspan: jnp.linspace(xspan[0]+1e-4, xspan[1]-1e-4, 300)
-xs_grids = jax.vmap(gen_xgrid)(xspans)
-Xg = jnp.meshgrid(*xs_grids)
-xs = jnp.stack([Xg[i].ravel() for i in range(len(Xg))]).T
-#evonnfit.get_N(evonnfit.W, xs)
-#evonnfit.get_J(evonnfit.W, xs)
-#g = evonnfit.get_gamma(evonnfit.W, xs)
-#print(g)
+    # Evolve
+    ode = evonnfit.get_ode(xs)
+    term = dfx.ODETerm(ode)
+    solver = dfx.Euler()
+    #stepsize_controller = dfx.PIDController(rtol=1e-4, atol=1e-4)
+    t1 = 1
+    stepsize_controller = dfx.ConstantStepSize()
+    saveat = dfx.SaveAt(ts=np.linspace(pde.tspan[0], t1, 100).tolist())
+    str2_time = time()
+    sol = dfx.diffeqsolve(term, solver, t0=pde.tspan[0], t1=t1, dt0=0.001, y0=evonnfit.W, saveat=saveat, stepsize_controller=stepsize_controller, progress_meter=dfx.TqdmProgressMeter(refresh_steps=2))
+    end_time = time()
+    print("Time elapsed: ", end_time - time_str)
+    print("Time elapsed for evolution: ", end_time - str2_time)
 
-# Evolve
-term = dfx.ODETerm(evonnfit.ode)
-solver = dfx.Euler()
-#stepsize_controller = dfx.PIDController(rtol=1e-4, atol=1e-4)
-t1 = 1
-stepsize_controller = dfx.ConstantStepSize()
-saveat = dfx.SaveAt(ts=np.linspace(pde.tspan[0], t1, 100).tolist())
-str2_time = time()
-sol = dfx.diffeqsolve(term, solver, t0=pde.tspan[0], t1=t1, dt0=0.001, y0=evonnfit.W, saveat=saveat, stepsize_controller=stepsize_controller, progress_meter=dfx.TqdmProgressMeter(refresh_steps=2))
-end_time = time()
-print("Time elapsed: ", end_time - time_str)
-print("Time elapsed for evolution: ", end_time - str2_time)
+    fig, ax = plt.subplots()
+    plot_sections(ax, 1., sol, evonnfit, pde, pde.u_true)
+    fig5, ax5 = plt.subplots()
+    _, err_nn = plot_error(ax5, sol, evonnfit, pde, pde.u_true)
+    print("Number of parameters: ", evonnfit.W.shape[0])
 
-#%%
-fig, ax = plt.subplots()
-plot_sections(ax, 1., sol, evonnfit, pde, pde.u_true)
-fig5, ax5 = plt.subplots()
-_, err_nn = plot_error(ax5, sol, evonnfit, pde, pde.u_true)
-print("Number of parameters: ", evonnfit.W.shape[0])
 
 # %%
