@@ -89,12 +89,12 @@ class DivergenceFreeNN2D(eqx.Module):
 
 key = jr.PRNGKey(0)
 nbatch = 1000
-nstep = 10000
+nstep = 20000
 pde = TaylorGreenVortex2D(params=jnp.array([1, 1.]), 
                           xspan=jnp.array([[0., 2*jnp.pi], [0, 2*jnp.pi]]), 
                           tspan=jnp.array([0., 1.]))
 
-opt = optax.adam(learning_rate=optax.exponential_decay(1e-4, 1000, 0.9))
+opt = optax.adam(learning_rate=optax.exponential_decay(1e-3, 1000, 0.9))
 
 nn = DivergenceFreeNN2D(width_size=30, depth=4, key=key)
 #nn = eqx.nn.MLP(2, 2, 10, 4, activation=jnp.tanh,key=jax.random.PRNGKey(0))
@@ -130,24 +130,45 @@ end_time = time()
 #print("Time elapsed for evolution: ", end_time - str2_time)
 #%%
 import matplotlib.pyplot as plt
+
+def curl(func):
+    # func: U(x,y) -> u, v
+    u_func = lambda x, y: jnp.sum(func(jnp.array([x, y]))[0])
+    v_func = lambda x, y: jnp.sum(func(jnp.array([x, y]))[1])
+
+    ux_func = jax.grad(u_func, argnums=0)
+    uy_func = jax.grad(u_func, argnums=1)
+    vx_func = jax.grad(v_func, argnums=0)
+    vy_func = jax.grad(v_func, argnums=1)
+
+    def curl_func(X):
+        x, y = X
+        return vx_func(x, y) - uy_func(x, y)
+    
+    return curl_func
+
 @eqx.filter_jit
 def loop2d(arr1, arr2, fun):
     funcex = jax.jit(lambda x,y: fun(jnp.stack([x,y])))
     fj = jax.vmap(funcex, in_axes=(0,0))
     fi = jax.vmap(fj, in_axes=(0,0))
     return fi(arr1, arr2)
-w = 3
-Y, X = np.mgrid[-w:w:100j, -w:w:100j]
+w = 6
+Y, X = np.mgrid[0:w:100j, 0:w:100j]
 UV = u_true(X, Y, 0, 1., 1.)
 U = UV[0]
 V = UV[1]
-speed = np.sqrt(U**2 + V**2)
+
+u_true2 = lambda xy: u_true(xy[0], xy[1], 1., 1., 1.)
+curl_true = curl(u_true2)
+speed= loop2d(X, Y, curl_true)
 lw = 5*speed / speed.max()
 
 fig, axs = plt.subplots()
 #  Varying density along a streamline
-axs.streamplot(X, Y, U, V, density=[0.5, 1], cmap='autumn', linewidth=lw)
+axs.streamplot(X, Y, U, V, density=[0.5, 1], cmap='autumn')
 axs.set_title('Varying Density')
+plt.contourf(X, Y, speed, cmap='autumn')
 # %%
 i = 0
 t = sol.ts[i]
@@ -158,11 +179,12 @@ Z =  loop2d(X, Y, nn)
 U_nn = Z[:,:,0]
 V_nn = Z[:,:,1]
 
-speed = np.sqrt(U_nn**2 + V_nn**2)
-lw = 5*speed / speed.max()
+curl_pred = curl(nn)
+speed = loop2d(X, Y, curl_pred)
 
 fig, axs = plt.subplots()
 #  Varying density along a streamline
 axs.streamplot(X, Y, U_nn, V_nn, density=[0.5, 1], cmap='autumn', linewidth=lw)
-axs.set_title('Varying Density')
+axs.set_title('Varying Density (t={})'.format(t))
+plt.contourf(X, Y, speed, cmap='autumn')
 # %%
